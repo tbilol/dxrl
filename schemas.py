@@ -13,6 +13,20 @@ class _Trimmed(BaseModel):
         return v.strip() if isinstance(v, str) else v
 
 
+# --------------------------- Umumiy (owner) ---------------------------
+
+
+class OwnerOut(BaseModel):
+    """E'lon egasi haqidagi qisqa ma'lumot (kartalarda va chatda ishlatiladi)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    avatar_url: Optional[str] = None
+    role: Optional[str] = None
+
+
 # --------------------------- Auctions ---------------------------
 
 
@@ -23,6 +37,7 @@ class AuctionBase(_Trimmed):
     price: Optional[float] = Field(default=None, ge=0, description="so'm/kg")
     phone: str = Field(min_length=1, max_length=40)
     address: Optional[str] = Field(default=None, max_length=255)
+    notes: Optional[str] = Field(default=None, max_length=2000, description="Izoh")
 
 
 class AuctionCreate(AuctionBase):
@@ -36,6 +51,7 @@ class AuctionUpdate(_Trimmed):
     price: Optional[float] = Field(default=None, ge=0)
     phone: Optional[str] = Field(default=None, min_length=1, max_length=40)
     address: Optional[str] = Field(default=None, max_length=255)
+    notes: Optional[str] = Field(default=None, max_length=2000)
     status: Optional[str] = Field(default=None, max_length=20)
 
 
@@ -45,6 +61,8 @@ class AuctionOut(AuctionBase):
     id: str
     status: str
     created_at: datetime
+    owner_id: Optional[str] = None
+    owner: Optional[OwnerOut] = None
 
 
 # --------------------------- Requests ---------------------------
@@ -57,6 +75,7 @@ class RequestBase(_Trimmed):
     offer_price: Optional[float] = Field(default=None, ge=0, description="so'm/kg")
     phone: str = Field(min_length=1, max_length=40)
     address: Optional[str] = Field(default=None, max_length=255)
+    notes: Optional[str] = Field(default=None, max_length=2000, description="Izoh")
 
 
 class RequestCreate(RequestBase):
@@ -70,6 +89,7 @@ class RequestUpdate(_Trimmed):
     offer_price: Optional[float] = Field(default=None, ge=0)
     phone: Optional[str] = Field(default=None, min_length=1, max_length=40)
     address: Optional[str] = Field(default=None, max_length=255)
+    notes: Optional[str] = Field(default=None, max_length=2000)
     status: Optional[str] = Field(default=None, max_length=20)
 
 
@@ -79,6 +99,8 @@ class RequestOut(RequestBase):
     id: str
     status: str
     created_at: datetime
+    owner_id: Optional[str] = None
+    owner: Optional[OwnerOut] = None
 
 
 # --------------------------- Profiles ---------------------------
@@ -106,14 +128,62 @@ class ProfileOut(ProfileBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    # Google orqali yangi kirgan foydalanuvchida telefon hali bo'sh bo'ladi.
+    phone: str = Field(default="", max_length=40)
+    email: Optional[str] = None
+    avatar_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
 
-# --------------------------- Stats ---------------------------
+# --------------------------- Xabarlar ---------------------------
+
+
+class ConversationCreate(BaseModel):
+    other_user_id: str = Field(min_length=1, max_length=36)
+
+
+class MessageCreate(_Trimmed):
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class MessageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    conversation_id: str
+    sender_id: str
+    receiver_id: str
+    content: str
+    is_read: bool
+    created_at: datetime
+
+
+class ConversationOut(BaseModel):
+    """Suhbatlar ro'yxati uchun — suhbatdosh, oxirgi xabar va o'qilmaganlar soni."""
+
+    id: str
+    other_user: OwnerOut
+    last_message: Optional[str] = None
+    last_message_at: datetime
+    last_message_sender_id: Optional[str] = None
+    unread_count: int = 0
+    created_at: datetime
+
+
+class UnreadCountOut(BaseModel):
+    unread_count: int
+
+
+# --------------------------- Stats / yordamchi ---------------------------
 
 
 class TopProduct(BaseModel):
     product: str
     total_quantity: float
+    count: int
+
+
+class ProductSuggestion(BaseModel):
+    product: str
     count: int

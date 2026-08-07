@@ -1,15 +1,26 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 
-from database import Base, engine
-from routers import auctions, profiles, requests, stats
+import auth
+from database import Base, engine, run_migrations
+from routers import auctions, conversations, products, profiles, requests, stats
 
 Base.metadata.create_all(bind=engine)
+run_migrations()
 
 app = FastAPI(
     title="Agro Auksion API",
     description="Qishloq xo'jaligi auksion platformasi uchun API",
-    version="1.0.0",
+    version="2.0.0",
+)
+
+# OAuth `state` parametrini saqlash uchun (Authlib shu sessiyadan foydalanadi).
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=auth.JWT_SECRET or "agro-auksion-dev-session",
+    same_site="lax",
+    https_only=False,
 )
 
 app.add_middleware(
@@ -23,10 +34,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
 app.include_router(auctions.router)
 app.include_router(requests.router)
 app.include_router(stats.router)
 app.include_router(profiles.router)
+app.include_router(conversations.router)
+app.include_router(products.router)
 
 
 @app.get("/")

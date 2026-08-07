@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 import schemas
+from auth import get_current_user
 from database import get_db
 from models import Profile
 
@@ -15,8 +16,20 @@ def _get_or_404(db: Session, profile_id: str) -> Profile:
     return profile
 
 
+def _ensure_owner(profile: Profile, current_user: Profile) -> None:
+    if profile.id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Faqat o'z profilingizni o'zgartira olasiz",
+        )
+
+
 @router.post("", response_model=schemas.ProfileOut, status_code=status.HTTP_201_CREATED)
-def create_profile(payload: schemas.ProfileCreate, db: Session = Depends(get_db)):
+def create_profile(
+    payload: schemas.ProfileCreate,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     profile = Profile(**payload.model_dump())
     db.add(profile)
     db.commit()
@@ -39,8 +52,10 @@ def update_profile(
     profile_id: str,
     payload: schemas.ProfileUpdate,
     db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
 ):
     profile = _get_or_404(db, profile_id)
+    _ensure_owner(profile, current_user)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(profile, field, value)
     db.commit()
@@ -49,7 +64,12 @@ def update_profile(
 
 
 @router.delete("/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_profile(profile_id: str, db: Session = Depends(get_db)):
+def delete_profile(
+    profile_id: str,
+    db: Session = Depends(get_db),
+    current_user: Profile = Depends(get_current_user),
+):
     profile = _get_or_404(db, profile_id)
+    _ensure_owner(profile, current_user)
     db.delete(profile)
     db.commit()
