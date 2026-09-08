@@ -1,0 +1,22 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+fastapi = "==0.115.6"
+sqlalchemy = "==2.0.36"
+pydantic = "==2.10.4"
+authlib = "==1.4.0"
+httpx = "==0.28.1"
+python-dotenv = "==1.0.1"
+itsdangerous = "==2.2.0"
+uvicorn = {extras = ["standard"], version = "==0.34.0"}
+python-jose = {extras = ["cryptography"], version = "==3.3.0"}
+bcrypt = "*"
+
+[dev-packages]
+
+[requires]
+python_version = "3.13"
+python_full_version = "3.13.15"
