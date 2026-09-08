@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
@@ -69,8 +70,34 @@ class Profile(Base):
     role = Column(String(20), nullable=False, default="dehqon")
     phone = Column(String(40), nullable=False, default="")
     address = Column(String(255), nullable=True)
+
+    # Telefon + parol orqali kirish. phone_hash — normallashtirilgan raqamning
+    # SHA-256 yig'indisi: takrorlanmas indeks va tez qidiruv uchun.
+    phone_hash = Column(String(64), unique=True, index=True, nullable=True)
+    password_hash = Column(String(255), nullable=True)
+
+    # Apple (iCloud) Sign-In identifikatori.
+    apple_id = Column(String(255), unique=True, index=True, nullable=True)
+
     created_at = Column(DateTime, nullable=False, default=utcnow)
     updated_at = Column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+
+class Follow(Base):
+    """Obuna: `follower_id` foydalanuvchisi `following_id` ni kuzatadi."""
+
+    __tablename__ = "follows"
+    __table_args__ = (
+        UniqueConstraint("follower_id", "following_id", name="uq_follow_pair"),
+    )
+
+    id = Column(String(36), primary_key=True, default=new_uuid)
+    follower_id = Column(String(36), ForeignKey("profiles.id"), nullable=False, index=True)
+    following_id = Column(String(36), ForeignKey("profiles.id"), nullable=False, index=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow)
+
+    follower = relationship("Profile", foreign_keys=[follower_id], lazy="joined")
+    following = relationship("Profile", foreign_keys=[following_id], lazy="joined")
 
 
 class Conversation(Base):

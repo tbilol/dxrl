@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 import schemas
 from database import get_db
+from logger import log
 from models import Auction, Request
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
@@ -34,17 +35,21 @@ def _top_products(db: Session, model) -> list[schemas.TopProduct]:
 
 @router.get("/top-auctions", response_model=list[schemas.TopProduct])
 def top_auctions(db: Session = Depends(get_db)):
-    return _top_products(db, Auction)
+    rows = _top_products(db, Auction)
+    log("API", "GET /api/stats/top-auctions", f"count={len(rows)}")
+    return rows
 
 
 @router.get("/top-requests", response_model=list[schemas.TopProduct])
 def top_requests(db: Session = Depends(get_db)):
-    return _top_products(db, Request)
+    rows = _top_products(db, Request)
+    log("API", "GET /api/stats/top-requests", f"count={len(rows)}")
+    return rows
 
 
 @router.get("/summary")
 def summary(db: Session = Depends(get_db)):
-    return {
+    data = {
         "auctions_count": db.query(func.count(Auction.id))
         .filter(Auction.status == "active")
         .scalar(),
@@ -52,3 +57,5 @@ def summary(db: Session = Depends(get_db)):
         .filter(Request.status == "active")
         .scalar(),
     }
+    log("API", "GET /api/stats/summary", data)
+    return data

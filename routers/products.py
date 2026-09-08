@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 import schemas
 from database import get_db
+from logger import log
 from models import Auction, Request
 
 router = APIRouter(prefix="/api/products", tags=["products"])
@@ -68,4 +69,6 @@ def product_suggestions(
     ]
     # Ko'p ishlatilganlari yuqorida, so'ng alifbo tartibida.
     matches.sort(key=lambda s: (-s.count, s.product.lower()))
-    return matches[:limit]
+    top = matches[:limit]
+    log("API", "GET /api/products/suggestions", f"q='{needle}', count={len(top)}")
+    return top

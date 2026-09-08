@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Agro Auksion — backend ishga tushirish skripti
+# AGROGRAM — backend ishga tushirish skripti
 set -e
 
 cd "$(dirname "$0")"

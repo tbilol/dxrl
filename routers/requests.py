@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 import schemas
 from auth import get_current_user
 from database import get_db
+from logger import log, log_error, short_id
 from models import Profile, Request
 
 router = APIRouter(prefix="/api/requests", tags=["requests"])
@@ -14,6 +15,7 @@ router = APIRouter(prefix="/api/requests", tags=["requests"])
 def _get_or_404(db: Session, request_id: str) -> Request:
     item = db.get(Request, request_id)
     if item is None:
+        log_error("API", "So'rov topilmadi", f"id={short_id(request_id)}")
         raise HTTPException(status_code=404, detail="So'rov topilmadi")
     return item
 
@@ -37,6 +39,11 @@ def create_request(
     db.add(item)
     db.commit()
     db.refresh(item)
+    log(
+        "API",
+        "POST /api/requests",
+        f"product={item.product}, qty={item.quantity}, owner={short_id(current_user.id)}",
+    )
     return item
 
 
@@ -53,7 +60,9 @@ def list_requests(
         query = query.filter(Request.owner_id == owner_id)
     else:
         query = query.filter(Request.status == "active")
-    return query.order_by(Request.created_at.desc()).all()
+    results = query.order_by(Request.created_at.desc()).all()
+    log("API", "GET /api/requests", f"count={len(results)}, owner={short_id(owner_id) if owner_id else 'all'}")
+    return results
 
 
 @router.get("/{request_id}", response_model=schemas.RequestOut)
@@ -70,10 +79,12 @@ def update_request(
 ):
     item = _get_or_404(db, request_id)
     _ensure_owner(item, current_user)
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changed = payload.model_dump(exclude_unset=True)
+    for field, value in changed.items():
         setattr(item, field, value)
     db.commit()
     db.refresh(item)
+    log("API", "PUT /api/requests", f"id={short_id(item.id)}, fields={list(changed)}")
     return item
 
 
@@ -87,3 +98,4 @@ def delete_request(
     _ensure_owner(item, current_user)
     db.delete(item)
     db.commit()
+    log("API", "DELETE /api/requests", f"id={short_id(request_id)}")

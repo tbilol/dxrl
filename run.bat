@@ -1,5 +1,5 @@
 @echo off
-REM Agro Auksion - backend ishga tushirish skripti (Windows)
+REM AGROGRAM - backend ishga tushirish skripti (Windows)
 cd /d "%~dp0"
 
 if not exist ".venv" (

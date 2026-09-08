@@ -135,6 +135,68 @@ class ProfileOut(ProfileBase):
     created_at: datetime
     updated_at: datetime
 
+    # --- Instagram uslubidagi profil ko'rsatkichlari ---
+    # Bu maydonlarni profile_service.serialize_profile() to'ldiradi.
+    followers_count: int = 0
+    following_count: int = 0
+    total_listings_count: int = 0
+    is_followed: bool = False
+    is_me: bool = False
+
+    # --- Ulangan kirish usullari (sozlamalar sahifasi uchun) ---
+    has_google: bool = False
+    has_password: bool = False
+    has_apple: bool = False
+
+
+class FollowUserOut(BaseModel):
+    """Kuzatuvchilar / kuzatilganlar ro'yxatidagi bitta qator."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    avatar_url: Optional[str] = None
+    role: Optional[str] = None
+    address: Optional[str] = None
+    is_followed: bool = False
+    is_me: bool = False
+
+
+class FollowStateOut(BaseModel):
+    """Obuna tugmasi bosilgandan keyingi yangi holat."""
+
+    is_followed: bool
+    followers_count: int
+
+
+# --------------------------- Autentifikatsiya ---------------------------
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    profile: ProfileOut
+
+
+class PhoneRegisterIn(_Trimmed):
+    name: str = Field(min_length=1, max_length=120)
+    phone: str = Field(min_length=1, max_length=40)
+    password: str = Field(min_length=6, max_length=128)
+    role: Role = "dehqon"
+
+
+class PhoneLoginIn(_Trimmed):
+    phone: str = Field(min_length=1, max_length=40)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class PhoneLinkIn(_Trimmed):
+    """Mavjud profilga telefon + parol qo'shish (token talab qilinadi)."""
+
+    phone: str = Field(min_length=1, max_length=40)
+    password: str = Field(min_length=6, max_length=128)
+
 
 # --------------------------- Xabarlar ---------------------------
 

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 import schemas
 from auth import get_current_user
 from database import get_db
+from logger import log, log_error, short_id
 from models import Conversation, Message, Profile, utcnow
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -21,8 +22,14 @@ def _get_conversation_or_404(
 ) -> Conversation:
     conv = db.get(Conversation, conversation_id)
     if conv is None:
+        log_error("CHAT", "Suhbat topilmadi", f"id={short_id(conversation_id)}")
         raise HTTPException(status_code=404, detail="Suhbat topilmadi")
     if current_user.id not in (conv.participant_1, conv.participant_2):
+        log_error(
+            "CHAT",
+            "Begona suhbatga kirishga urinish",
+            f"conv={short_id(conversation_id)}, user={short_id(current_user.id)}",
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Bu suhbat sizga tegishli emas",
@@ -67,6 +74,13 @@ def create_or_get_conversation(
         db.add(conv)
         db.commit()
         db.refresh(conv)
+        log(
+            "CHAT",
+            "Suhbat yaratildi",
+            f"id={short_id(conv.id)}, {short_id(current_user.id)} <-> {short_id(other_id)}",
+        )
+    else:
+        log("CHAT", "Mavjud suhbat ochildi", f"id={short_id(conv.id)}")
 
     return _serialize_conversation(db, conv, current_user)
 
@@ -120,6 +134,7 @@ def list_conversations(
         .order_by(Conversation.last_message_at.desc())
         .all()
     )
+    log("CHAT", "GET /api/conversations", f"count={len(convs)}, user={short_id(current_user.id)}")
     return [_serialize_conversation(db, c, current_user) for c in convs]
 
 
@@ -166,7 +181,9 @@ def list_messages(
         for m in unread:
             m.is_read = True
         db.commit()
+        log("CHAT", "Xabarlar o'qilgan deb belgilandi", f"count={len(unread)}")
 
+    log("CHAT", "Xabarlar yuklandi", f"conv={short_id(conv.id)}, count={len(batch)}")
     return batch
 
 
@@ -196,4 +213,9 @@ def send_message(
     conv.last_message_at = utcnow()
     db.commit()
     db.refresh(message)
+    log(
+        "CHAT",
+        "Xabar yuborildi",
+        f"{short_id(current_user.id)} -> {short_id(receiver_id)}, {len(message.content)} belgi",
+    )
     return message
