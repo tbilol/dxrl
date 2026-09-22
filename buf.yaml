@@ -1,0 +1,34 @@
+# buf workspace for the AGROGRAM backend contracts.
+#
+# Every buf command runs from the bufbuild/buf Docker image (see Makefile and
+# README.md): no local protoc, buf or protoc-gen-* plugins are needed.
+version: v2
+
+modules:
+  - path: proto
+
+deps:
+  # Field constraints (UUIDs, phone format, positive quantities, ...) are part of
+  # the contract and are enforced at runtime by protovalidate-{go,java,python}.
+  - buf.build/bufbuild/protovalidate
+
+lint:
+  use:
+    - STANDARD
+    # Every service, RPC, message and enum must say what it is for.
+    - COMMENT_SERVICE
+    - COMMENT_RPC
+    - COMMENT_MESSAGE
+    - COMMENT_ENUM
+  except:
+    # Packages are `agrogram.<service>.v1` while directories are
+    # `proto/<service>/v1`: we keep the requested service-named layout and still
+    # get globally unique names for gRPC routes and Kafka event types.
+    - PACKAGE_DIRECTORY_MATCH
+  enum_zero_value_suffix: _UNSPECIFIED
+  service_suffix: Service
+  disallow_comment_ignores: true
+
+breaking:
+  use:
+    - FILE

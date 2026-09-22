@@ -1,0 +1,10 @@
+# Build context for every services/*/Dockerfile is back/. Keep it lean.
+.git
+.buf-cache
+**/__pycache__
+**/*.pyc
+**/.venv
+**/node_modules
+*.db
+*.db.bak-*
+.env

@@ -1,0 +1,149 @@
+syntax = "proto3";
+
+package agrogram.common.v1;
+
+// ProductType is the FIXED list of products that can be listed, requested,
+// traded and used as a crop in the yield calculator. Free-text product names
+// are never accepted anywhere in the API.
+//
+// Each value maps 1:1 to the stable key used by the front-end
+// (front/src/data/products.js) and stored on legacy listings:
+//
+//   key = lower(value name without "PRODUCT_TYPE_"), with "_" replaced by "-"
+//   PRODUCT_TYPE_BUGDOY           <-> "bugdoy"
+//   PRODUCT_TYPE_ACHCHIQ_QALAMPIR <-> "achchiq-qalampir"
+//
+// Display names (uz / ru), category, ordering and crop norms are reference
+// data served at runtime (catalog: product types; agri-calculator: crop norms),
+// so labels can change without touching this contract.
+//
+// Adding a product = append a new value with the next free number, then add its
+// reference data. Never renumber, rename or reuse a value; mark retired values
+// `deprecated = true` instead.
+enum ProductType {
+  PRODUCT_TYPE_UNSPECIFIED = 0;
+
+  // ---- Grains & industrial crops (don va texnika ekinlari) -----------------
+
+  // bugdoy: Bug'doy / Пшеница (wheat).
+  PRODUCT_TYPE_BUGDOY = 1;
+  // arpa: Arpa / Ячмень (barley).
+  PRODUCT_TYPE_ARPA = 2;
+  // sholi: Sholi / Рис (rice, paddy).
+  PRODUCT_TYPE_SHOLI = 3;
+  // makkajoxori: Makkajo'xori / Кукуруза (maize).
+  PRODUCT_TYPE_MAKKAJOXORI = 4;
+  // paxta: Paxta / Хлопок (cotton).
+  PRODUCT_TYPE_PAXTA = 5;
+  // kungaboqar: Kungaboqar / Подсолнечник (sunflower).
+  PRODUCT_TYPE_KUNGABOQAR = 6;
+  // kunjut: Kunjut / Кунжут (sesame).
+  PRODUCT_TYPE_KUNJUT = 7;
+  // beda: Beda / Люцерна (alfalfa).
+  PRODUCT_TYPE_BEDA = 8;
+
+  // ---- Vegetables (sabzavot) -----------------------------------------------
+
+  // kartoshka: Kartoshka / Картофель (potato).
+  PRODUCT_TYPE_KARTOSHKA = 9;
+  // sabzi: Sabzi / Морковь (carrot).
+  PRODUCT_TYPE_SABZI = 10;
+  // piyoz: Piyoz / Лук (onion).
+  PRODUCT_TYPE_PIYOZ = 11;
+  // sarimsoq: Sarimsoq / Чеснок (garlic).
+  PRODUCT_TYPE_SARIMSOQ = 12;
+  // pomidor: Pomidor / Помидор (tomato).
+  PRODUCT_TYPE_POMIDOR = 13;
+  // bodring: Bodring / Огурец (cucumber).
+  PRODUCT_TYPE_BODRING = 14;
+  // karam: Karam / Капуста (cabbage).
+  PRODUCT_TYPE_KARAM = 15;
+  // qalampir: Bulg'or qalampiri / Сладкий перец (bell pepper).
+  PRODUCT_TYPE_QALAMPIR = 16;
+  // achchiq-qalampir: Achchiq qalampir / Острый перец (hot pepper).
+  PRODUCT_TYPE_ACHCHIQ_QALAMPIR = 17;
+  // baqlajon: Baqlajon / Баклажан (eggplant).
+  PRODUCT_TYPE_BAQLAJON = 18;
+  // qovoq: Qovoq / Тыква (pumpkin).
+  PRODUCT_TYPE_QOVOQ = 19;
+  // turp: Turp / Редька (radish).
+  PRODUCT_TYPE_TURP = 20;
+  // lavlagi: Lavlagi / Свёкла (beet).
+  PRODUCT_TYPE_LAVLAGI = 21;
+
+  // ---- Legumes (dukkakli) --------------------------------------------------
+
+  // mosh: Mosh / Маш (mung bean).
+  PRODUCT_TYPE_MOSH = 22;
+  // noxat: No'xat / Нут (chickpea).
+  PRODUCT_TYPE_NOXAT = 23;
+  // loviya: Loviya / Фасоль (bean).
+  PRODUCT_TYPE_LOVIYA = 24;
+
+  // ---- Melons & gourds (poliz) ---------------------------------------------
+
+  // qovun: Qovun / Дыня (melon).
+  PRODUCT_TYPE_QOVUN = 25;
+  // tarvuz: Tarvuz / Арбуз (watermelon).
+  PRODUCT_TYPE_TARVUZ = 26;
+
+  // ---- Fruit & berries (meva) — perennial, no seed-based crop norms --------
+
+  // uzum: Uzum / Виноград (grape).
+  PRODUCT_TYPE_UZUM = 27;
+  // olma: Olma / Яблоко (apple).
+  PRODUCT_TYPE_OLMA = 28;
+  // nok: Nok / Груша (pear).
+  PRODUCT_TYPE_NOK = 29;
+  // behi: Behi / Айва (quince).
+  PRODUCT_TYPE_BEHI = 30;
+  // shaftoli: Shaftoli / Персик (peach).
+  PRODUCT_TYPE_SHAFTOLI = 31;
+  // orik: O'rik / Абрикос (apricot).
+  PRODUCT_TYPE_ORIK = 32;
+  // gilos: Gilos / Черешня (sweet cherry).
+  PRODUCT_TYPE_GILOS = 33;
+  // olcha: Olcha / Вишня (sour cherry).
+  PRODUCT_TYPE_OLCHA = 34;
+  // olxori: Olxo'ri / Слива (plum).
+  PRODUCT_TYPE_OLXORI = 35;
+  // anor: Anor / Гранат (pomegranate).
+  PRODUCT_TYPE_ANOR = 36;
+  // xurmo: Xurmo / Хурма (persimmon).
+  PRODUCT_TYPE_XURMO = 37;
+  // anjir: Anjir / Инжир (fig).
+  PRODUCT_TYPE_ANJIR = 38;
+  // tut: Tut / Шелковица (mulberry).
+  PRODUCT_TYPE_TUT = 39;
+  // limon: Limon / Лимон (lemon).
+  PRODUCT_TYPE_LIMON = 40;
+  // qulupnay: Qulupnay / Клубника (strawberry).
+  PRODUCT_TYPE_QULUPNAY = 41;
+
+  // ---- Nuts (yong'oq) — perennial ------------------------------------------
+
+  // yongoq: Yong'oq / Грецкий орех (walnut).
+  PRODUCT_TYPE_YONGOQ = 42;
+  // bodom: Bodom / Миндаль (almond).
+  PRODUCT_TYPE_BODOM = 43;
+  // pista: Pista / Фисташка (pistachio).
+  PRODUCT_TYPE_PISTA = 44;
+}
+
+// ProductCategory groups product types for browsing and analytics.
+// The type -> category mapping is reference data (catalog), not encoded here.
+enum ProductCategory {
+  PRODUCT_CATEGORY_UNSPECIFIED = 0;
+  // Grains and industrial crops (don va texnika ekinlari): wheat, cotton, ...
+  PRODUCT_CATEGORY_GRAIN_INDUSTRIAL = 1;
+  // Vegetables (sabzavot).
+  PRODUCT_CATEGORY_VEGETABLE = 2;
+  // Legumes (dukkakli).
+  PRODUCT_CATEGORY_LEGUME = 3;
+  // Melons and gourds (poliz).
+  PRODUCT_CATEGORY_MELON = 4;
+  // Fruit and berries (meva).
+  PRODUCT_CATEGORY_FRUIT = 5;
+  // Nuts (yong'oq).
+  PRODUCT_CATEGORY_NUT = 6;
+}

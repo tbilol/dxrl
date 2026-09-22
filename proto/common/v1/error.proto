@@ -1,0 +1,155 @@
+syntax = "proto3";
+
+package agrogram.common.v1;
+
+// ErrorReason is the platform-wide, machine-readable cause of a failure.
+//
+// Clients localize user-facing text by reason (uz / ru); `Error.message` is
+// for developers only. Each value notes the gRPC status code it travels with.
+// Values are grouped in numeric ranges per domain; add new values, never
+// renumber or reuse old ones.
+enum ErrorReason {
+  ERROR_REASON_UNSPECIFIED = 0;
+
+  // ---- Generic (1-99) ----------------------------------------------------
+
+  // INVALID_ARGUMENT. Request failed validation; see `field_violations`.
+  ERROR_REASON_VALIDATION_FAILED = 1;
+  // NOT_FOUND. The addressed resource does not exist (or is hidden from the caller).
+  ERROR_REASON_NOT_FOUND = 2;
+  // ALREADY_EXISTS. A resource with the same identity already exists.
+  ERROR_REASON_ALREADY_EXISTS = 3;
+  // ABORTED. Optimistic-concurrency check failed (stale `expected_version`).
+  ERROR_REASON_CONFLICT = 4;
+  // UNAUTHENTICATED. No or unusable credentials.
+  ERROR_REASON_UNAUTHENTICATED = 5;
+  // PERMISSION_DENIED. Authenticated, but not allowed to do this.
+  ERROR_REASON_PERMISSION_DENIED = 6;
+  // RESOURCE_EXHAUSTED. Too many requests; retry after the indicated delay.
+  ERROR_REASON_RATE_LIMITED = 7;
+  // UNIMPLEMENTED. The contract exists but the behaviour is still a stub
+  // (for example the tax and payment-provider parts of order-escrow).
+  ERROR_REASON_NOT_IMPLEMENTED = 8;
+  // UNAVAILABLE. A downstream dependency (e-ijara, payment provider, ...) is down.
+  ERROR_REASON_DEPENDENCY_UNAVAILABLE = 9;
+  // INTERNAL. Unexpected server error.
+  ERROR_REASON_INTERNAL = 10;
+  // FAILED_PRECONDITION. The system is not in a state that allows the call.
+  ERROR_REASON_FAILED_PRECONDITION = 11;
+
+  // ---- Authentication & accounts (100-199) ---------------------------------
+
+  // UNAUTHENTICATED. Wrong phone/password pair or rejected provider token.
+  ERROR_REASON_INVALID_CREDENTIALS = 100;
+  // UNAUTHENTICATED. Access or refresh token has expired.
+  ERROR_REASON_TOKEN_EXPIRED = 101;
+  // UNAUTHENTICATED. Token is malformed, has a bad signature or wrong audience.
+  ERROR_REASON_TOKEN_INVALID = 102;
+  // UNAUTHENTICATED. Session was signed out or the refresh token was reused.
+  ERROR_REASON_TOKEN_REVOKED = 103;
+  // ALREADY_EXISTS. The phone number already belongs to another account.
+  ERROR_REASON_PHONE_ALREADY_REGISTERED = 104;
+  // PERMISSION_DENIED. The account is blocked or deleted.
+  ERROR_REASON_ACCOUNT_DISABLED = 105;
+  // ALREADY_EXISTS. The Google / Apple identity is linked to another account.
+  ERROR_REASON_PROVIDER_ALREADY_LINKED = 106;
+  // FAILED_PRECONDITION. Unlinking would leave the account without any sign-in method.
+  ERROR_REASON_LAST_SIGN_IN_METHOD = 107;
+  // INVALID_ARGUMENT. One-time SMS code is wrong or expired.
+  ERROR_REASON_OTP_INVALID = 108;
+
+  // ---- Plans & entitlements (200-299) --------------------------------------
+
+  // PERMISSION_DENIED. Feature needs the Premium plan (yield calculator,
+  // listing video, badge).
+  ERROR_REASON_PREMIUM_REQUIRED = 200;
+  // RESOURCE_EXHAUSTED. Listing quota for the plan is used up
+  // (Default: 5 offers / 5 buy-requests; Premium: 20 / 25).
+  // metadata: {"plan", "listing_kind", "limit"}.
+  ERROR_REASON_PLAN_LIMIT_REACHED = 201;
+
+  // ---- Farmer verification / e-ijara (300-399) -----------------------------
+
+  // FAILED_PRECONDITION. Posting sell offers requires an e-ijara-verified farmer.
+  ERROR_REASON_FARMER_VERIFICATION_REQUIRED = 300;
+  // FAILED_PRECONDITION. e-ijara has no active land-lease contract with this number.
+  ERROR_REASON_LEASE_CONTRACT_INVALID = 301;
+  // ALREADY_EXISTS. The lease contract is already bound to another account.
+  ERROR_REASON_LEASE_CONTRACT_ALREADY_CLAIMED = 302;
+
+  // ---- Listings (400-499) --------------------------------------------------
+
+  // FAILED_PRECONDITION. The listing is closed, sold out or blocked.
+  ERROR_REASON_LISTING_NOT_ACTIVE = 400;
+  // FAILED_PRECONDITION. Requested quantity exceeds what the listing still offers.
+  ERROR_REASON_INSUFFICIENT_QUANTITY = 401;
+
+  // ---- Escrow transactions (500-599) ---------------------------------------
+
+  // FAILED_PRECONDITION. The command is not valid in the transaction's current state.
+  // metadata: {"state", "command"}.
+  ERROR_REASON_INVALID_STATE_TRANSITION = 500;
+  // PERMISSION_DENIED. The caller is not the farmer or reseller of this transaction,
+  // or is the wrong party for this step.
+  ERROR_REASON_NOT_TRANSACTION_PARTY = 501;
+  // FAILED_PRECONDITION. The pay-in was declined or could not be confirmed.
+  ERROR_REASON_PAYMENT_FAILED = 502;
+  // FAILED_PRECONDITION. The weighbridge receipt (tarozi cheki) failed verification.
+  ERROR_REASON_RECEIPT_REJECTED = 503;
+  // FAILED_PRECONDITION. A party cannot trade with itself.
+  ERROR_REASON_SELF_TRADE_NOT_ALLOWED = 504;
+
+  // ---- Social (600-699) ----------------------------------------------------
+
+  // INVALID_ARGUMENT. Users cannot follow or rate themselves.
+  ERROR_REASON_SELF_ACTION_NOT_ALLOWED = 600;
+  // FAILED_PRECONDITION. Ratings need a completed transaction between the two users.
+  ERROR_REASON_RATING_NOT_ALLOWED = 601;
+  // ALREADY_EXISTS. This transaction has already been rated by the caller.
+  ERROR_REASON_ALREADY_RATED = 602;
+
+  // ---- Media (700-799) -----------------------------------------------------
+
+  // INVALID_ARGUMENT. Content type is not accepted for this media purpose.
+  ERROR_REASON_UNSUPPORTED_MEDIA_TYPE = 700;
+  // INVALID_ARGUMENT. File size or video duration exceeds the purpose's limit.
+  ERROR_REASON_MEDIA_TOO_LARGE = 701;
+  // FAILED_PRECONDITION. Transcoding / image processing / OCR failed.
+  ERROR_REASON_MEDIA_PROCESSING_FAILED = 702;
+}
+
+// Error is the platform's standard error payload.
+//
+// On gRPC: every non-OK status carries exactly one `Error` packed into
+// `google.rpc.Status.details`; the status code follows the table in
+// `ErrorReason`. In data: Kafka events (a failed media job), dead-letter
+// records and per-item results of batch RPCs embed `Error` directly.
+message Error {
+  // Machine-readable cause.
+  ErrorReason reason = 1;
+
+  // Developer-facing English description. Never shown to end users.
+  string message = 2;
+
+  // Service that produced the error, e.g. "order-escrow".
+  string domain = 3;
+
+  // Structured context, e.g. {"plan": "default", "limit": "5"}. Keys are
+  // lower_snake_case; values are strings.
+  map<string, string> metadata = 4;
+
+  // Per-field problems when `reason` is ERROR_REASON_VALIDATION_FAILED.
+  repeated FieldViolation field_violations = 5;
+}
+
+// FieldViolation describes one invalid request field.
+message FieldViolation {
+  // Path to the field, e.g. "listing.quantity.grams" or "items[2].media_id".
+  string field = 1;
+
+  // Developer-facing description of what is wrong.
+  string description = 2;
+
+  // Rule identifier, e.g. the protovalidate rule id "string.uuid".
+  string rule = 3;
+}

@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+package agrogram.events.v1;
+
+import "buf/validate/validate.proto";
+import "common/v1/address.proto";
+import "common/v1/market.proto";
+import "common/v1/media.proto";
+import "common/v1/money.proto";
+import "common/v1/product.proto";
+import "common/v1/quantity.proto";
+import "events/v1/metadata.proto";
+import "google/protobuf/timestamp.proto";
+
+// Listing stream
+// ==============
+//
+//   Topic      agrogram.catalog.listing.v1
+//   Key        listing_id
+//   Producer   catalog
+//   Consumers  profile-social (a user's own listings), analytics (supply and
+//              demand statistics), notification (followers of the owner)
+//
+// Events: ListingCreated. Later event types (for example ListingUpdated or
+// ListingClosed) are new `oneof` cases and do not break consumers.
+
+// ListingStatus is where a catalog listing is in its life cycle. Shared by the
+// catalog API and this stream.
+enum ListingStatus {
+  LISTING_STATUS_UNSPECIFIED = 0;
+  // On the board and open for new transactions.
+  LISTING_STATUS_ACTIVE = 1;
+  // Closed by the owner: off the board; transactions already started continue.
+  LISTING_STATUS_CLOSED = 2;
+  // The whole quantity is committed to escrow transactions.
+  LISTING_STATUS_SOLD_OUT = 3;
+  // Hidden by staff moderation.
+  LISTING_STATUS_BLOCKED = 4;
+  // Deleted by the owner. Soft delete: kept because transactions reference it.
+  LISTING_STATUS_DELETED = 5;
+}
+
+// ListingEvent is the envelope of the listing stream, one per Kafka record.
+message ListingEvent {
+  // Event header.
+  EventMetadata metadata = 1 [(buf.validate.field).required = true];
+
+  // The listing after the event.
+  ListingSnapshot listing = 2 [(buf.validate.field).required = true];
+
+  // The concrete event. Producers set exactly one case. The oneof is not
+  // `required` on purpose: a consumer on an older schema sees a newer case as
+  // unset and must still accept the record (see metadata.proto).
+  oneof event {
+    // A listing was posted.
+    ListingCreated listing_created = 10;
+  }
+}
+
+// ListingSnapshot is the public state of a listing: what a listing card shows,
+// minus the contact phone, which is never published.
+message ListingSnapshot {
+  // Listing id (UUID). Equals the record key.
+  string id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Board: sell offer or buy-request.
+  common.v1.ListingKind kind = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+
+  // Account that posted it: the farmer of an offer, the reseller of a buy-request.
+  string owner_id = 3 [(buf.validate.field).string.uuid = true];
+
+  // Product.
+  common.v1.ProductType product = 4 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+
+  // Quantity posted.
+  common.v1.Mass quantity = 5 [(buf.validate.field).required = true];
+
+  // Quantity not yet committed to escrow transactions.
+  common.v1.Mass remaining_quantity = 6 [(buf.validate.field).required = true];
+
+  // Asking price (offer) or offered price (buy-request). Unset = negotiable.
+  common.v1.UnitPrice price = 7;
+
+  // Where the goods are (offer) or are wanted (buy-request).
+  common.v1.Address address = 8 [(buf.validate.field).required = true];
+
+  // Free-text description.
+  string notes = 9 [(buf.validate.field).string.max_len = 1000];
+
+  // Public photos and video, in display order.
+  repeated common.v1.MediaRef media = 10 [(buf.validate.field).repeated.max_items = 10];
+
+  // Life-cycle status.
+  ListingStatus status = 11 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+
+  // Aggregate version; equals EventMetadata.aggregate_version.
+  int64 version = 12 [(buf.validate.field).int64.gte = 1];
+
+  // When the listing was posted.
+  google.protobuf.Timestamp created_at = 13 [(buf.validate.field).required = true];
+
+  // When the listing last changed.
+  google.protobuf.Timestamp updated_at = 14 [(buf.validate.field).required = true];
+}
+
+// ListingCreated: a farmer posted a sell offer or a reseller posted a
+// buy-request. The listing is the envelope snapshot (status ACTIVE); there are
+// no creation-only details.
+message ListingCreated {}

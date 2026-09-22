@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 *.db
 *.db.bak-*
+
+# Contract tooling (generated code is reproducible via `make proto-gen`)
+gen/
+.buf-cache/

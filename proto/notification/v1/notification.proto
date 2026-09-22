@@ -1,0 +1,341 @@
+syntax = "proto3";
+
+package agrogram.notification.v1;
+
+import "buf/validate/validate.proto";
+import "common/v1/locale.proto";
+import "common/v1/pagination.proto";
+import "common/v1/resource.proto";
+import "events/v1/notification.proto";
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+
+// NotificationService delivers push, SMS and in-app (inbox) notifications
+// and keeps each user's preferences and push devices.
+//
+// Most notifications arrive as NotificationRequested events on
+// agrogram.notification.request.v1. SendNotification is the synchronous path
+// for internal callers that need the outcome, or whose content must never be
+// written to Kafka, such as sign-in codes. Templates are rendered in uz or ru
+// from the recipient's preferred language.
+service NotificationService {
+  // Internal. Sends one notification now.
+  rpc SendNotification(SendNotificationRequest) returns (SendNotificationResponse);
+
+  // Lists the caller's inbox (in-app notifications), newest first.
+  rpc ListNotifications(ListNotificationsRequest) returns (ListNotificationsResponse);
+
+  // Returns the caller's unread inbox count, for the badge.
+  rpc GetUnreadCount(GetUnreadCountRequest) returns (GetUnreadCountResponse);
+
+  // Marks inbox notifications as read.
+  rpc MarkNotificationsRead(MarkNotificationsReadRequest) returns (MarkNotificationsReadResponse);
+
+  // Returns the caller's notification preferences.
+  rpc GetNotificationPreferences(GetNotificationPreferencesRequest) returns (GetNotificationPreferencesResponse);
+
+  // Updates the caller's notification preferences. SECURITY notifications
+  // cannot be turned off.
+  rpc UpdateNotificationPreferences(UpdateNotificationPreferencesRequest) returns (UpdateNotificationPreferencesResponse);
+
+  // Registers or refreshes the push token of one of the caller's devices.
+  // Idempotent per `device_id`.
+  rpc RegisterDevice(RegisterDeviceRequest) returns (RegisterDeviceResponse);
+
+  // Stops push notifications to one of the caller's devices (sign-out).
+  rpc UnregisterDevice(UnregisterDeviceRequest) returns (UnregisterDeviceResponse);
+}
+
+// PushProvider is the push service a device token belongs to.
+enum PushProvider {
+  PUSH_PROVIDER_UNSPECIFIED = 0;
+  // Firebase Cloud Messaging (Android and web).
+  PUSH_PROVIDER_FCM = 1;
+  // Apple Push Notification service (iOS).
+  PUSH_PROVIDER_APNS = 2;
+}
+
+// Notification is one item in a user's inbox, rendered in the caller's
+// language.
+message Notification {
+  // Notification id (UUID).
+  string id = 1;
+
+  // Category.
+  agrogram.events.v1.NotificationCategory category = 2;
+
+  // Title.
+  string title = 3;
+
+  // Body text.
+  string body = 4;
+
+  // What it is about; the app deep-links to it.
+  common.v1.ResourceRef subject = 5;
+
+  // The user has read it.
+  bool is_read = 6;
+
+  // When it was created.
+  google.protobuf.Timestamp created_at = 7;
+
+  // When it was read.
+  google.protobuf.Timestamp read_at = 8;
+}
+
+// NotificationPreferences are one user's delivery settings.
+message NotificationPreferences {
+  // Per-category channel choices. Categories not listed use their defaults.
+  repeated CategoryPreference categories = 1 [(buf.validate.field).repeated.max_items = 20];
+
+  // Language for push, SMS and inbox text. Unspecified = uz.
+  common.v1.Language language = 2 [(buf.validate.field).enum.defined_only = true];
+}
+
+// CategoryPreference is the set of channels enabled for one category.
+message CategoryPreference {
+  // The category.
+  agrogram.events.v1.NotificationCategory category = 1 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+
+  // Channels enabled. Empty mutes the category (SECURITY keeps its defaults).
+  repeated agrogram.events.v1.NotificationChannel channels = 2 [(buf.validate.field).repeated = {
+    max_items: 3
+    unique: true
+    items: {
+      enum: {
+        defined_only: true
+        not_in: [0]
+      }
+    }
+  }];
+}
+
+// SendNotificationRequest is the input of SendNotification.
+message SendNotificationRequest {
+  option (buf.validate.message).cel = {
+    id: "send_notification.phone_is_sms_only"
+    message: "a phone_number recipient can only get SMS (channels = [NOTIFICATION_CHANNEL_SMS])"
+    expression: "!has(this.phone_number) || (size(this.channels) == 1 && this.channels[0] == 3)"
+  };
+
+  // Idempotency key (UUID).
+  string request_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Who to notify.
+  oneof recipient {
+    option (buf.validate.oneof).required = true;
+
+    // An account.
+    string user_id = 2 [(buf.validate.field).string.uuid = true];
+
+    // A phone number that may not have an account yet (sign-up codes). SMS
+    // only.
+    string phone_number = 3 [(buf.validate.field).string.pattern = "^\\+998[0-9]{9}$"];
+  }
+
+  // Category; decides which preferences apply.
+  agrogram.events.v1.NotificationCategory category = 4 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+
+  // Template key, e.g. "security.sign_up_code".
+  string template_key = 5 [(buf.validate.field).string = {
+    max_len: 100
+    pattern: "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$"
+  }];
+
+  // Template parameters. May hold one-time codes, so never log them.
+  map<string, string> params = 6 [
+    debug_redact = true,
+    (buf.validate.field).map = {
+      max_pairs: 20
+      keys: {
+        string: {pattern: "^[a-z][a-z0-9_]{0,63}$"}
+      }
+      values: {
+        string: {max_len: 500}
+      }
+    }
+  ];
+
+  // Channels to use. Empty = the category's defaults, filtered by the
+  // recipient's preferences.
+  repeated agrogram.events.v1.NotificationChannel channels = 7 [(buf.validate.field).repeated = {
+    max_items: 3
+    unique: true
+    items: {
+      enum: {
+        defined_only: true
+        not_in: [0]
+      }
+    }
+  }];
+
+  // What the notification is about; the app deep-links to it.
+  common.v1.ResourceRef subject = 8;
+}
+
+// SendNotificationResponse is the output of SendNotification.
+message SendNotificationResponse {
+  // Notification id (UUID).
+  string notification_id = 1;
+
+  // Channels the notification was handed to.
+  repeated agrogram.events.v1.NotificationChannel channels = 2;
+}
+
+// ListNotificationsRequest is the input of ListNotifications.
+message ListNotificationsRequest {
+  // Read state to list: false = unread only, true = read only, unset = all.
+  optional bool is_read = 1;
+
+  // Categories to list. Empty = all.
+  repeated agrogram.events.v1.NotificationCategory categories = 2 [(buf.validate.field).repeated = {
+    max_items: 20
+    unique: true
+    items: {
+      enum: {
+        defined_only: true
+        not_in: [0]
+      }
+    }
+  }];
+
+  // Page to read.
+  common.v1.PageRequest page = 3;
+}
+
+// ListNotificationsResponse is the output of ListNotifications.
+message ListNotificationsResponse {
+  // Notifications, newest first.
+  repeated Notification notifications = 1;
+
+  // Next-page cursor.
+  common.v1.PageResponse page = 2;
+
+  // Unread count across the whole inbox.
+  int64 unread_count = 3;
+}
+
+// GetUnreadCountRequest is the input of GetUnreadCount.
+message GetUnreadCountRequest {}
+
+// GetUnreadCountResponse is the output of GetUnreadCount.
+message GetUnreadCountResponse {
+  // Unread inbox notifications.
+  int64 unread_count = 1;
+}
+
+// MarkNotificationsReadRequest is the input of MarkNotificationsRead. Set
+// exactly one of `notification_ids` and `read_through`.
+message MarkNotificationsReadRequest {
+  option (buf.validate.message).cel = {
+    id: "mark_notifications_read.one_selector"
+    message: "set exactly one of notification_ids and read_through"
+    expression: "(size(this.notification_ids) > 0) != has(this.read_through)"
+  };
+
+  // These notifications.
+  repeated string notification_ids = 1 [(buf.validate.field).repeated = {
+    max_items: 100
+    unique: true
+    items: {
+      string: {uuid: true}
+    }
+  }];
+
+  // Every notification created at or before this time ("mark all as read":
+  // pass the newest notification's created_at).
+  google.protobuf.Timestamp read_through = 2;
+}
+
+// MarkNotificationsReadResponse is the output of MarkNotificationsRead.
+message MarkNotificationsReadResponse {
+  // Unread inbox notifications left.
+  int64 unread_count = 1;
+}
+
+// GetNotificationPreferencesRequest is the input of
+// GetNotificationPreferences.
+message GetNotificationPreferencesRequest {}
+
+// GetNotificationPreferencesResponse is the output of
+// GetNotificationPreferences.
+message GetNotificationPreferencesResponse {
+  // The caller's preferences, defaults filled in.
+  NotificationPreferences preferences = 1;
+}
+
+// UpdateNotificationPreferencesRequest is the input of
+// UpdateNotificationPreferences.
+message UpdateNotificationPreferencesRequest {
+  // New values of the fields in `update_mask`.
+  NotificationPreferences preferences = 1 [(buf.validate.field).required = true];
+
+  // Fields to change: "categories" (replaces the whole list), "language".
+  google.protobuf.FieldMask update_mask = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).field_mask = {
+      in: [
+        "categories",
+        "language"
+      ]
+    },
+    (buf.validate.field).cel = {
+      id: "update_notification_preferences.update_mask_not_empty"
+      message: "update_mask must name at least one field"
+      expression: "size(this.paths) > 0"
+    }
+  ];
+}
+
+// UpdateNotificationPreferencesResponse is the output of
+// UpdateNotificationPreferences.
+message UpdateNotificationPreferencesResponse {
+  // The updated preferences.
+  NotificationPreferences preferences = 1;
+}
+
+// RegisterDeviceRequest is the input of RegisterDevice.
+message RegisterDeviceRequest {
+  // Stable per-install id generated by the app (same as the sign-in
+  // ClientInfo.device_id).
+  string device_id = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 128
+  }];
+
+  // Push service of the token.
+  PushProvider provider = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+
+  // Push token from FCM or APNs.
+  string push_token = 3 [
+    debug_redact = true,
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 4096
+    }
+  ];
+}
+
+// RegisterDeviceResponse is the output of RegisterDevice.
+message RegisterDeviceResponse {}
+
+// UnregisterDeviceRequest is the input of UnregisterDevice.
+message UnregisterDeviceRequest {
+  // Device to stop notifying.
+  string device_id = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 128
+  }];
+}
+
+// UnregisterDeviceResponse is the output of UnregisterDevice.
+message UnregisterDeviceResponse {}

@@ -1,0 +1,115 @@
+syntax = "proto3";
+
+package agrogram.events.v1;
+
+import "buf/validate/validate.proto";
+import "common/v1/resource.proto";
+import "events/v1/metadata.proto";
+
+// Notification request stream
+// ===========================
+//
+//   Topic      agrogram.notification.request.v1
+//   Key        recipient_id
+//   Producers  any service (order-escrow, catalog, profile-social, identity, ...)
+//   Consumer   notification
+//
+// A service that wants a user notified publishes NotificationRequested.
+// Notification renders the template in the recipient's language, applies their
+// preferences and delivers it. Content that must never be written to Kafka
+// (sign-in codes) goes through notification's SendNotification RPC instead.
+
+// NotificationCategory groups notifications for preferences and inbox
+// filters. Shared by the notification API and this stream.
+enum NotificationCategory {
+  NOTIFICATION_CATEGORY_UNSPECIFIED = 0;
+  // Escrow transaction steps (payment held, receipt submitted, payout, ...).
+  NOTIFICATION_CATEGORY_TRANSACTION = 1;
+  // Activity on the user's listings, or new listings from followed users.
+  NOTIFICATION_CATEGORY_LISTING = 2;
+  // New followers and ratings.
+  NOTIFICATION_CATEGORY_SOCIAL = 3;
+  // Farmer verification results, plan changes.
+  NOTIFICATION_CATEGORY_ACCOUNT = 4;
+  // Sign-in codes, new sign-ins, password changes. Cannot be turned off.
+  NOTIFICATION_CATEGORY_SECURITY = 5;
+  // Incoming calls (signaling, later phase).
+  NOTIFICATION_CATEGORY_CALL = 6;
+}
+
+// NotificationChannel is a delivery channel. Shared by the notification API
+// and this stream.
+enum NotificationChannel {
+  NOTIFICATION_CHANNEL_UNSPECIFIED = 0;
+  // In-app inbox.
+  NOTIFICATION_CHANNEL_IN_APP = 1;
+  // Mobile or web push (FCM / APNs).
+  NOTIFICATION_CHANNEL_PUSH = 2;
+  // SMS to the account's phone number.
+  NOTIFICATION_CHANNEL_SMS = 3;
+}
+
+// NotificationRequestEvent is the envelope of the notification request stream,
+// one per Kafka record. The stream has no aggregate state, so field 2 (the
+// snapshot in other envelopes) is not used.
+message NotificationRequestEvent {
+  // Event header. aggregate_type is RESOURCE_TYPE_USER, aggregate_id the
+  // recipient and aggregate_version 0.
+  EventMetadata metadata = 1 [(buf.validate.field).required = true];
+
+  // The concrete event. Producers set exactly one case. The oneof is not
+  // `required` on purpose: a consumer on an older schema sees a newer case as
+  // unset and must still accept the record (see metadata.proto).
+  oneof event {
+    // A notification should be sent.
+    NotificationRequested notification_requested = 10;
+  }
+}
+
+// NotificationRequested: a service asks notification to notify a user.
+// Notification de-duplicates on EventMetadata.event_id.
+message NotificationRequested {
+  // Recipient user id (UUID). Equals the record key.
+  string recipient_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Category; decides which preferences apply.
+  NotificationCategory category = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+
+  // Template key, e.g. "transaction.payment_held". Templates hold the uz / ru
+  // text and are reference data owned by notification.
+  string template_key = 3 [(buf.validate.field).string = {
+    max_len: 100
+    pattern: "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$"
+  }];
+
+  // Template parameters, e.g. {"product": "bugdoy", "amount_minor": "150000"}.
+  // No contact details or credentials.
+  map<string, string> params = 4 [(buf.validate.field).map = {
+    max_pairs: 20
+    keys: {
+      string: {pattern: "^[a-z][a-z0-9_]{0,63}$"}
+    }
+    values: {
+      string: {max_len: 500}
+    }
+  }];
+
+  // Channels to use. Empty = the category's defaults, filtered by the
+  // recipient's preferences.
+  repeated NotificationChannel channels = 5 [(buf.validate.field).repeated = {
+    max_items: 3
+    unique: true
+    items: {
+      enum: {
+        defined_only: true
+        not_in: [0]
+      }
+    }
+  }];
+
+  // What the notification is about; the app deep-links to it.
+  common.v1.ResourceRef subject = 6;
+}

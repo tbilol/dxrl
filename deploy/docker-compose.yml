@@ -1,0 +1,26 @@
+# AGROGRAM local stack: PLACEHOLDER (Phase 0).
+#
+# This file is filled in during the infrastructure step. It is intentionally
+# empty now, because no service has an implementation yet. Planned contents:
+#
+#   infra     kafka (KRaft, single node) + a protobuf-aware schema registry
+#             postgres (one database per service, never shared)
+#             redis (sessions, rate limits, presence)
+#             minio (S3-compatible object storage for media-pipeline)
+#             clickhouse, pending the analytics redesign
+#             coturn (TURN server for signaling, later phase)
+#   edge      api-gateway (Envoy or Kong): validates JWTs against auth-gateway's
+#             JWKS, strips and injects x-agrogram-* metadata, transcodes
+#             gRPC <-> JSON for the web app (preserve_proto_field_names)
+#             edge-cdn: serves processed media renditions
+#   services  auth-gateway, identity, profile-social, catalog, agri-calculator,
+#             order-escrow, notification, analytics, media-pipeline, signaling;
+#             each built from services/<name>/Dockerfile with context `..`
+#             (back/), gRPC on :50051 and health/metrics on :8081 in-container
+#
+# Code generation does not use this file: `make proto-gen` runs buf in its own
+# throwaway container (see ../README.md).
+
+name: agrogram
+
+services: {}

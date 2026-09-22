@@ -1,0 +1,431 @@
+syntax = "proto3";
+
+package agrogram.catalog.v1;
+
+import "buf/validate/validate.proto";
+import "common/v1/address.proto";
+import "common/v1/locale.proto";
+import "common/v1/market.proto";
+import "common/v1/media.proto";
+import "common/v1/money.proto";
+import "common/v1/pagination.proto";
+import "common/v1/product.proto";
+import "common/v1/quantity.proto";
+import "events/v1/listing.proto";
+import "events/v1/profile.proto";
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+
+// CatalogService owns both boards: farmers' sell offers and resellers'
+// buy-requests. Both are one Listing model; `kind` tells them apart. It also
+// serves the product reference data.
+//
+// Posting rules, checked on create: offers need ROLE_FARMER
+// (FARMER_VERIFICATION_REQUIRED); each kind has a plan quota
+// (PLAN_LIMIT_REACHED); a video needs Premium (PREMIUM_REQUIRED). The service
+// publishes the listing stream (agrogram.catalog.listing.v1), builds listing
+// owner cards from the profile stream, and tracks remaining quantity from the
+// transaction stream. order-escrow calls GetListing to snapshot a listing into
+// a transaction.
+service CatalogService {
+  // Posts a listing on the board its `kind` names.
+  // Errors: FARMER_VERIFICATION_REQUIRED, PLAN_LIMIT_REACHED, PREMIUM_REQUIRED.
+  rpc CreateListing(CreateListingRequest) returns (CreateListingResponse);
+
+  // Returns a listing. Non-ACTIVE listings are visible to their owner, to the
+  // parties of transactions on them, and to staff.
+  rpc GetListing(GetListingRequest) returns (GetListingResponse);
+
+  // Updates the caller's listing. `kind` cannot change.
+  // Errors: CONFLICT (stale expected_version), PREMIUM_REQUIRED.
+  rpc UpdateListing(UpdateListingRequest) returns (UpdateListingResponse);
+
+  // Deletes the caller's listing (soft delete, status DELETED). Transactions
+  // already started on it continue.
+  rpc DeleteListing(DeleteListingRequest) returns (DeleteListingResponse);
+
+  // Browses a board, or one owner's listings, newest first.
+  rpc ListListings(ListListingsRequest) returns (ListListingsResponse);
+
+  // Searches listings by free text and filters, with a choice of sort order.
+  rpc SearchListings(SearchListingsRequest) returns (SearchListingsResponse);
+
+  // Returns the product reference data: names, categories and display order.
+  rpc ListProductTypes(ListProductTypesRequest) returns (ListProductTypesResponse);
+}
+
+// ListingSortField is what search results are ordered by.
+enum ListingSortField {
+  // Default: RELEVANCE when `query` is set, otherwise CREATED_AT.
+  LISTING_SORT_FIELD_UNSPECIFIED = 0;
+  // Text match quality. Descending only.
+  LISTING_SORT_FIELD_RELEVANCE = 1;
+  // Posting time.
+  LISTING_SORT_FIELD_CREATED_AT = 2;
+  // Price per kg; negotiable listings sort last.
+  LISTING_SORT_FIELD_PRICE = 3;
+  // Remaining quantity.
+  LISTING_SORT_FIELD_QUANTITY = 4;
+}
+
+// Listing is a sell offer (farmers' board) or a buy-request (resellers' board).
+message Listing {
+  // Output only. Listing id (UUID).
+  string id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.uuid = true
+  ];
+
+  // Board. Required on create; cannot change afterwards.
+  common.v1.ListingKind kind = 2 [(buf.validate.field).enum.defined_only = true];
+
+  // Output only. The caller who posted it: the farmer of an offer, the
+  // reseller of a buy-request.
+  string owner_id = 3 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.uuid = true
+  ];
+
+  // Product. Required on create.
+  common.v1.ProductType product = 4 [(buf.validate.field).enum.defined_only = true];
+
+  // Quantity offered or wanted (display unit usually tonnes). Required on
+  // create; must be positive.
+  common.v1.Mass quantity = 5 [(buf.validate.field).cel = {
+    id: "listing.quantity_positive"
+    message: "quantity must be positive"
+    expression: "this.grams > 0"
+  }];
+
+  // Output only. Quantity not yet committed to escrow transactions.
+  common.v1.Mass remaining_quantity = 6;
+
+  // Price per kg or tonne in UZS: the asking price of an offer, the offered
+  // price of a buy-request. Unset = negotiable ("kelishiladi").
+  common.v1.UnitPrice price = 7 [(buf.validate.field).cel = {
+    id: "listing.price_positive_uzs"
+    message: "price must be a positive amount in UZS"
+    expression: "this.amount.currency_code == 'UZS' && this.amount.amount_minor > 0"
+  }];
+
+  // Contact phone shown on the listing (+998XXXXXXXXX). Required on create.
+  // Never published in events.
+  string phone = 8 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.pattern = "^\\+998[0-9]{9}$"
+  ];
+
+  // Where the goods are (offer) or are wanted (buy-request). Required on create.
+  common.v1.Address address = 9;
+
+  // Free-text description: quality, packaging, loading conditions.
+  string notes = 10 [(buf.validate.field).string.max_len = 1000];
+
+  // Photos and, on Premium, one short video, in display order. Uploads with
+  // purpose MEDIA_PURPOSE_LISTING_IMAGE / MEDIA_PURPOSE_LISTING_VIDEO.
+  repeated common.v1.MediaRef media = 11 [(buf.validate.field).repeated.max_items = 10];
+
+  // Output only. Life-cycle status.
+  agrogram.events.v1.ListingStatus status = 12;
+
+  // Output only. Owner card, projected from the profile stream.
+  ListingOwner owner = 13;
+
+  // Output only. How many times the listing was opened.
+  int64 views_count = 14;
+
+  // Output only. Optimistic-concurrency version.
+  int64 version = 15;
+
+  // Output only. When the listing was posted.
+  google.protobuf.Timestamp created_at = 16;
+
+  // Output only. When the listing last changed.
+  google.protobuf.Timestamp updated_at = 17;
+}
+
+// ListingOwner is the owner card shown on a listing.
+message ListingOwner {
+  // Owner user id.
+  string user_id = 1;
+
+  // Display name.
+  string display_name = 2;
+
+  // Profile picture.
+  common.v1.MediaRef avatar = 3;
+
+  // Aggregate rating.
+  agrogram.events.v1.RatingSummary rating = 4;
+
+  // Premium badge.
+  bool is_premium = 5;
+
+  // E-ijara-verified farmer badge.
+  bool is_verified_farmer = 6;
+}
+
+// ListingFilter narrows ListListings and SearchListings. Unset fields do not
+// filter. Repeated fields match any of their values.
+message ListingFilter {
+  option (buf.validate.message).cel = {
+    id: "listing_filter.price_range"
+    message: "min_price must not exceed max_price"
+    expression: "!has(this.min_price) || !has(this.max_price) || this.min_price.unit != this.max_price.unit || this.min_price.amount.amount_minor <= this.max_price.amount.amount_minor"
+  };
+
+  // Board. Unspecified = both.
+  common.v1.ListingKind kind = 1 [(buf.validate.field).enum.defined_only = true];
+
+  // Products.
+  repeated common.v1.ProductType product_types = 2 [(buf.validate.field).repeated = {
+    max_items: 50
+    unique: true
+    items: {
+      enum: {
+        defined_only: true
+        not_in: [0]
+      }
+    }
+  }];
+
+  // Regions of the listing address.
+  repeated common.v1.Region regions = 3 [(buf.validate.field).repeated = {
+    max_items: 14
+    unique: true
+    items: {
+      enum: {
+        defined_only: true
+        not_in: [0]
+      }
+    }
+  }];
+
+  // District of the listing address (exact match).
+  string district = 4 [(buf.validate.field).string.max_len = 120];
+
+  // Owner.
+  string owner_id = 5 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.uuid = true
+  ];
+
+  // Statuses. Empty = ACTIVE. Other statuses are returned only for the
+  // caller's own listings, or to staff.
+  repeated agrogram.events.v1.ListingStatus statuses = 6 [(buf.validate.field).repeated = {
+    max_items: 5
+    unique: true
+    items: {
+      enum: {
+        defined_only: true
+        not_in: [0]
+      }
+    }
+  }];
+
+  // At least this much remaining quantity.
+  common.v1.Mass min_quantity = 7;
+
+  // At least this price. Excludes negotiable listings.
+  common.v1.UnitPrice min_price = 8;
+
+  // At most this price. Excludes negotiable listings.
+  common.v1.UnitPrice max_price = 9;
+}
+
+// ProductTypeInfo is the reference data of one product type.
+message ProductTypeInfo {
+  // The product.
+  common.v1.ProductType type = 1;
+
+  // Stable front-end key, e.g. "achchiq-qalampir" (see common/v1/product.proto).
+  string key = 2;
+
+  // Display name.
+  common.v1.LocalizedText name = 3;
+
+  // Category for browsing and statistics.
+  common.v1.ProductCategory category = 4;
+
+  // Display order, ascending.
+  int32 sort_order = 5;
+
+  // Retired: kept on old listings, not offered for new ones.
+  bool is_retired = 6;
+}
+
+// CreateListingRequest is the input of CreateListing.
+message CreateListingRequest {
+  // Idempotency key (UUID).
+  string request_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // The listing. Output-only fields are ignored.
+  Listing listing = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).cel = {
+      id: "create_listing.kind_required"
+      message: "kind is required"
+      expression: "this.kind != 0"
+    },
+    (buf.validate.field).cel = {
+      id: "create_listing.product_required"
+      message: "product is required"
+      expression: "this.product != 0"
+    },
+    (buf.validate.field).cel = {
+      id: "create_listing.quantity_required"
+      message: "quantity is required"
+      expression: "has(this.quantity)"
+    },
+    (buf.validate.field).cel = {
+      id: "create_listing.phone_required"
+      message: "phone is required"
+      expression: "this.phone != ''"
+    },
+    (buf.validate.field).cel = {
+      id: "create_listing.address_required"
+      message: "address is required"
+      expression: "has(this.address)"
+    }
+  ];
+}
+
+// CreateListingResponse is the output of CreateListing.
+message CreateListingResponse {
+  // The new listing (status ACTIVE).
+  Listing listing = 1;
+}
+
+// GetListingRequest is the input of GetListing.
+message GetListingRequest {
+  // Listing to read.
+  string listing_id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+// GetListingResponse is the output of GetListing.
+message GetListingResponse {
+  // The listing.
+  Listing listing = 1;
+}
+
+// UpdateListingRequest is the input of UpdateListing.
+message UpdateListingRequest {
+  option (buf.validate.message).cel = {
+    id: "update_listing.required_fields_not_cleared"
+    message: "product, quantity, phone and address cannot be cleared"
+    expression: "(!('product' in this.update_mask.paths) || this.listing.product != 0) && (!('quantity' in this.update_mask.paths) || has(this.listing.quantity)) && (!('phone' in this.update_mask.paths) || this.listing.phone != '') && (!('address' in this.update_mask.paths) || has(this.listing.address))"
+  };
+
+  // The listing, with `id` set and the new values of the fields in
+  // `update_mask`.
+  Listing listing = 1 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).cel = {
+      id: "update_listing.id_required"
+      message: "listing.id is required"
+      expression: "this.id != ''"
+    }
+  ];
+
+  // Fields to change.
+  google.protobuf.FieldMask update_mask = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).field_mask = {
+      in: [
+        "product",
+        "quantity",
+        "price",
+        "phone",
+        "address",
+        "notes",
+        "media"
+      ]
+    },
+    (buf.validate.field).cel = {
+      id: "update_listing.update_mask_not_empty"
+      message: "update_mask must name at least one field"
+      expression: "size(this.paths) > 0"
+    }
+  ];
+
+  // Version the change is based on; 0 skips the check. A stale version fails
+  // with ABORTED / CONFLICT.
+  int64 expected_version = 3 [(buf.validate.field).int64.gte = 0];
+}
+
+// UpdateListingResponse is the output of UpdateListing.
+message UpdateListingResponse {
+  // The updated listing.
+  Listing listing = 1;
+}
+
+// DeleteListingRequest is the input of DeleteListing.
+message DeleteListingRequest {
+  // Listing to delete.
+  string listing_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Version the deletion is based on; 0 skips the check.
+  int64 expected_version = 2 [(buf.validate.field).int64.gte = 0];
+}
+
+// DeleteListingResponse is the output of DeleteListing.
+message DeleteListingResponse {}
+
+// ListListingsRequest is the input of ListListings.
+message ListListingsRequest {
+  // What to list.
+  ListingFilter filter = 1;
+
+  // Page to read.
+  common.v1.PageRequest page = 2;
+}
+
+// ListListingsResponse is the output of ListListings.
+message ListListingsResponse {
+  // Listings, newest first.
+  repeated Listing listings = 1;
+
+  // Next-page cursor.
+  common.v1.PageResponse page = 2;
+}
+
+// SearchListingsRequest is the input of SearchListings.
+message SearchListingsRequest {
+  // Free text matched against product names (uz / ru), notes, district and
+  // owner name. Empty = filters only.
+  string query = 1 [(buf.validate.field).string.max_len = 200];
+
+  // Filters.
+  ListingFilter filter = 2;
+
+  // Sort key.
+  ListingSortField sort_by = 3 [(buf.validate.field).enum.defined_only = true];
+
+  // Sort direction. Unspecified = descending.
+  common.v1.SortDirection sort_direction = 4 [(buf.validate.field).enum.defined_only = true];
+
+  // Page to read.
+  common.v1.PageRequest page = 5;
+}
+
+// SearchListingsResponse is the output of SearchListings.
+message SearchListingsResponse {
+  // Matching listings, in the requested order.
+  repeated Listing listings = 1;
+
+  // Next-page cursor.
+  common.v1.PageResponse page = 2;
+}
+
+// ListProductTypesRequest is the input of ListProductTypes.
+message ListProductTypesRequest {
+  // Category to list. Unspecified = all.
+  common.v1.ProductCategory category = 1 [(buf.validate.field).enum.defined_only = true];
+}
+
+// ListProductTypesResponse is the output of ListProductTypes.
+message ListProductTypesResponse {
+  // Product types in display order, including retired ones (`is_retired`) so
+  // old listings keep their labels.
+  repeated ProductTypeInfo product_types = 1;
+}

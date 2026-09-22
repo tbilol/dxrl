@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package agrogram.common.v1;
+
+import "buf/validate/validate.proto";
+
+// Region is a first-level administrative division of Uzbekistan (viloyat,
+// the Republic of Karakalpakstan, or Tashkent city). Comments give the
+// ISO 3166-2 code and the uz / ru names the front-end shows.
+enum Region {
+  REGION_UNSPECIFIED = 0;
+  // UZ-TK: Toshkent shahri / город Ташкент.
+  REGION_TOSHKENT_SHAHRI = 1;
+  // UZ-TO: Toshkent viloyati / Ташкентская область.
+  REGION_TOSHKENT_VILOYATI = 2;
+  // UZ-AN: Andijon / Андижанская область.
+  REGION_ANDIJON = 3;
+  // UZ-FA: Farg'ona / Ферганская область.
+  REGION_FARGONA = 4;
+  // UZ-NG: Namangan / Наманганская область.
+  REGION_NAMANGAN = 5;
+  // UZ-SA: Samarqand / Самаркандская область.
+  REGION_SAMARQAND = 6;
+  // UZ-BU: Buxoro / Бухарская область.
+  REGION_BUXORO = 7;
+  // UZ-NW: Navoiy / Навоийская область.
+  REGION_NAVOIY = 8;
+  // UZ-QA: Qashqadaryo / Кашкадарьинская область.
+  REGION_QASHQADARYO = 9;
+  // UZ-SU: Surxondaryo / Сурхандарьинская область.
+  REGION_SURXONDARYO = 10;
+  // UZ-JI: Jizzax / Джизакская область.
+  REGION_JIZZAX = 11;
+  // UZ-SI: Sirdaryo / Сырдарьинская область.
+  REGION_SIRDARYO = 12;
+  // UZ-XO: Xorazm / Хорезмская область.
+  REGION_XORAZM = 13;
+  // UZ-QR: Qoraqalpog'iston / Каракалпакстан.
+  REGION_QORAQALPOGISTON = 14;
+}
+
+// Address is a postal-style location inside Uzbekistan. Region is structured
+// (it drives search filters and analytics); the rest is free text for now.
+message Address {
+  // Required whenever an address is present.
+  Region region = 1 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+
+  // District or city (tuman / shahar), e.g. "Urgut tumani". Free text; a
+  // district reference list may replace it later.
+  string district = 2 [(buf.validate.field).string.max_len = 120];
+
+  // Village, mahalla, street, landmark.
+  string address_line = 3 [(buf.validate.field).string.max_len = 255];
+
+  // Optional map pin.
+  GeoPoint location = 4;
+}
+
+// GeoPoint is a WGS 84 coordinate.
+message GeoPoint {
+  // Degrees, -90..90.
+  double latitude = 1 [(buf.validate.field).double = {
+    gte: -90
+    lte: 90
+  }];
+
+  // Degrees, -180..180.
+  double longitude = 2 [(buf.validate.field).double = {
+    gte: -180
+    lte: 180
+  }];
+}

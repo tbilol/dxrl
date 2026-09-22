@@ -1,0 +1,327 @@
+syntax = "proto3";
+
+package agrogram.mediapipeline.v1;
+
+import "buf/validate/validate.proto";
+import "common/v1/error.proto";
+import "common/v1/media.proto";
+import "common/v1/resource.proto";
+import "events/v1/media.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// MediaPipelineService takes uploads and runs their processing jobs.
+//
+// Upload flow: CreateUpload returns a pre-signed URL; the app PUTs the file to
+// object storage; CompleteUpload publishes MediaUploaded and queues the jobs
+// for the purpose:
+//
+//   MEDIA_PURPOSE_LISTING_IMAGE        IMAGE_RENDITIONS   image, max 10 MB
+//   MEDIA_PURPOSE_AVATAR               IMAGE_RENDITIONS   image, max 5 MB
+//   MEDIA_PURPOSE_LISTING_VIDEO        VIDEO_TRANSCODE    video, max 100 MB and 60 s; Premium
+//   MEDIA_PURPOSE_WEIGHBRIDGE_RECEIPT  RECEIPT_OCR        image, max 10 MB; private
+//
+// Limits are configuration; the numbers above are the starting values.
+// Errors: UNSUPPORTED_MEDIA_TYPE, MEDIA_TOO_LARGE, PREMIUM_REQUIRED,
+// MEDIA_PROCESSING_FAILED.
+service MediaPipelineService {
+  // Creates a media object (PENDING_UPLOAD) and a pre-signed upload URL.
+  rpc CreateUpload(CreateUploadRequest) returns (CreateUploadResponse);
+
+  // Confirms the file is in storage: checks size and type, publishes
+  // MediaUploaded and queues the processing jobs (PROCESSING). Idempotent.
+  rpc CompleteUpload(CompleteUploadRequest) returns (CompleteUploadResponse);
+
+  // Returns a media object with its jobs. URLs of private media are signed
+  // and short-lived, and only returned to the owner, the resource's parties
+  // and staff.
+  rpc GetMedia(GetMediaRequest) returns (GetMediaResponse);
+
+  // Deletes the caller's media object and its renditions.
+  rpc DeleteMedia(DeleteMediaRequest) returns (DeleteMediaResponse);
+
+  // Returns one processing job.
+  rpc GetProcessingJob(GetProcessingJobRequest) returns (GetProcessingJobResponse);
+
+  // Runs a FAILED job again. Owner or staff.
+  rpc RetryProcessingJob(RetryProcessingJobRequest) returns (RetryProcessingJobResponse);
+}
+
+// ProcessingJobKind is the work a processing job does.
+enum ProcessingJobKind {
+  PROCESSING_JOB_KIND_UNSPECIFIED = 0;
+  // Resize and re-encode an image into display and thumbnail renditions.
+  PROCESSING_JOB_KIND_IMAGE_RENDITIONS = 1;
+  // Transcode a short video for streaming and extract a poster frame.
+  PROCESSING_JOB_KIND_VIDEO_TRANSCODE = 2;
+  // Read the ticket number and weights from a weighbridge receipt photo.
+  // TODO(weighbridge): OCR is not implemented yet.
+  PROCESSING_JOB_KIND_RECEIPT_OCR = 3;
+}
+
+// ProcessingJobStatus is where a processing job stands.
+enum ProcessingJobStatus {
+  PROCESSING_JOB_STATUS_UNSPECIFIED = 0;
+  // Waiting for a worker.
+  PROCESSING_JOB_STATUS_QUEUED = 1;
+  // A worker is on it.
+  PROCESSING_JOB_STATUS_RUNNING = 2;
+  // Done; `result` is set.
+  PROCESSING_JOB_STATUS_SUCCEEDED = 3;
+  // Gave up; `error` is set.
+  PROCESSING_JOB_STATUS_FAILED = 4;
+}
+
+// Media is an uploaded file and its processed renditions.
+message Media {
+  // Media id (UUID).
+  string id = 1;
+
+  // Uploader.
+  string owner_id = 2;
+
+  // What the file is for.
+  common.v1.MediaPurpose purpose = 3;
+
+  // Image or video.
+  common.v1.MediaType type = 4;
+
+  // Pipeline state.
+  common.v1.MediaStatus status = 5;
+
+  // Resource the file belongs to.
+  common.v1.ResourceRef attached_to = 6;
+
+  // MIME type of the original file.
+  string content_type = 7;
+
+  // Size of the original file.
+  int64 size_bytes = 8;
+
+  // Display rendition (image, or video stream) once READY.
+  string url = 9;
+
+  // Small image or video poster once READY.
+  string thumbnail_url = 10;
+
+  // Length of a video.
+  google.protobuf.Duration duration = 11;
+
+  // Width of the display rendition, in pixels.
+  int32 width = 12;
+
+  // Height of the display rendition, in pixels.
+  int32 height = 13;
+
+  // Processing jobs, oldest first.
+  repeated ProcessingJob jobs = 14;
+
+  // Why processing failed (status FAILED).
+  common.v1.Error error = 15;
+
+  // When the upload slot was created.
+  google.protobuf.Timestamp created_at = 16;
+
+  // When the media object last changed.
+  google.protobuf.Timestamp updated_at = 17;
+}
+
+// ProcessingJob is one unit of processing for a media object.
+message ProcessingJob {
+  // Job id (UUID).
+  string id = 1;
+
+  // Media object processed.
+  string media_id = 2;
+
+  // Work to do.
+  ProcessingJobKind kind = 3;
+
+  // Current status.
+  ProcessingJobStatus status = 4;
+
+  // Output of a SUCCEEDED job; the case matches `kind`.
+  oneof result {
+    // IMAGE_RENDITIONS output.
+    ImageRenditionsResult image_renditions = 5;
+
+    // VIDEO_TRANSCODE output.
+    VideoTranscodeResult video_transcode = 6;
+
+    // RECEIPT_OCR output.
+    agrogram.events.v1.ReceiptOcrResult receipt_ocr = 7;
+  }
+
+  // Why the job failed (status FAILED).
+  common.v1.Error error = 8;
+
+  // Attempts made so far.
+  int32 attempts = 9;
+
+  // When the job was queued.
+  google.protobuf.Timestamp created_at = 10;
+
+  // When the latest attempt started.
+  google.protobuf.Timestamp started_at = 11;
+
+  // When the job succeeded or finally failed.
+  google.protobuf.Timestamp finished_at = 12;
+}
+
+// ImageRenditionsResult is the output of an IMAGE_RENDITIONS job.
+message ImageRenditionsResult {
+  // Display rendition.
+  string display_url = 1;
+
+  // Thumbnail rendition.
+  string thumbnail_url = 2;
+
+  // Width of the display rendition, in pixels.
+  int32 width = 3;
+
+  // Height of the display rendition, in pixels.
+  int32 height = 4;
+}
+
+// VideoTranscodeResult is the output of a VIDEO_TRANSCODE job.
+message VideoTranscodeResult {
+  // Adaptive streaming manifest (HLS).
+  string playback_url = 1;
+
+  // Progressive MP4 fallback.
+  string mp4_url = 2;
+
+  // Poster frame image.
+  string poster_url = 3;
+
+  // Video length.
+  google.protobuf.Duration duration = 4;
+
+  // Width of the largest rendition, in pixels.
+  int32 width = 5;
+
+  // Height of the largest rendition, in pixels.
+  int32 height = 6;
+}
+
+// UploadTarget is where and how to PUT the file.
+message UploadTarget {
+  // Pre-signed URL. Anyone holding it can upload until `expires_at`.
+  string url = 1 [debug_redact = true];
+
+  // HTTP method, always "PUT".
+  string method = 2;
+
+  // Headers the request must carry exactly, e.g. Content-Type.
+  map<string, string> headers = 3;
+
+  // When the URL stops working.
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+// CreateUploadRequest is the input of CreateUpload.
+message CreateUploadRequest {
+  // Idempotency key (UUID).
+  string request_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // What the file is for; selects limits and jobs.
+  common.v1.MediaPurpose purpose = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+
+  // MIME type, e.g. "image/jpeg", "video/mp4".
+  string content_type = 3 [(buf.validate.field).string = {
+    max_len: 128
+    pattern: "^(image|video)/[a-z0-9.+-]+$"
+  }];
+
+  // File size. Per-purpose limits apply (MEDIA_TOO_LARGE).
+  int64 size_bytes = 4 [(buf.validate.field).int64 = {
+    gt: 0
+    lte: 209715200
+  }];
+
+  // Resource the file belongs to: the listing (listing media), the caller
+  // (avatar) or the transaction (weighbridge receipt).
+  common.v1.ResourceRef attach_to = 5;
+
+  // Original file name, for support and downloads.
+  string file_name = 6 [(buf.validate.field).string.max_len = 255];
+
+  // SHA-256 of the file, lowercase hex. When set, storage rejects a
+  // different file.
+  string sha256 = 7 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.pattern = "^[0-9a-f]{64}$"
+  ];
+}
+
+// CreateUploadResponse is the output of CreateUpload.
+message CreateUploadResponse {
+  // The media object (PENDING_UPLOAD).
+  Media media = 1;
+
+  // Where to upload the file.
+  UploadTarget upload = 2;
+}
+
+// CompleteUploadRequest is the input of CompleteUpload.
+message CompleteUploadRequest {
+  // Media object whose file was uploaded.
+  string media_id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+// CompleteUploadResponse is the output of CompleteUpload.
+message CompleteUploadResponse {
+  // The media object (PROCESSING) and its queued jobs.
+  Media media = 1;
+}
+
+// GetMediaRequest is the input of GetMedia.
+message GetMediaRequest {
+  // Media object to read.
+  string media_id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+// GetMediaResponse is the output of GetMedia.
+message GetMediaResponse {
+  // The media object.
+  Media media = 1;
+}
+
+// DeleteMediaRequest is the input of DeleteMedia.
+message DeleteMediaRequest {
+  // Media object to delete.
+  string media_id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+// DeleteMediaResponse is the output of DeleteMedia.
+message DeleteMediaResponse {}
+
+// GetProcessingJobRequest is the input of GetProcessingJob.
+message GetProcessingJobRequest {
+  // Job to read.
+  string job_id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+// GetProcessingJobResponse is the output of GetProcessingJob.
+message GetProcessingJobResponse {
+  // The job.
+  ProcessingJob job = 1;
+}
+
+// RetryProcessingJobRequest is the input of RetryProcessingJob.
+message RetryProcessingJobRequest {
+  // Idempotency key (UUID).
+  string request_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // FAILED job to run again.
+  string job_id = 2 [(buf.validate.field).string.uuid = true];
+}
+
+// RetryProcessingJobResponse is the output of RetryProcessingJob.
+message RetryProcessingJobResponse {
+  // The job, QUEUED again.
+  ProcessingJob job = 1;
+}

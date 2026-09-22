@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package agrogram.common.v1;
+
+import "buf/validate/validate.proto";
+
+// MediaType is the broad kind of an uploaded file.
+enum MediaType {
+  MEDIA_TYPE_UNSPECIFIED = 0;
+  // Still image (JPEG, PNG, WebP, HEIC).
+  MEDIA_TYPE_IMAGE = 1;
+  // Video (MP4, MOV, WebM).
+  MEDIA_TYPE_VIDEO = 2;
+}
+
+// MediaPurpose says what an upload is for. It selects the media-pipeline
+// processing job, size limits and who may read the result.
+enum MediaPurpose {
+  MEDIA_PURPOSE_UNSPECIFIED = 0;
+  // Photo on a catalog listing. Public.
+  MEDIA_PURPOSE_LISTING_IMAGE = 1;
+  // Short video on a catalog listing. Premium only. Transcoded for streaming,
+  // with a poster frame. Public.
+  MEDIA_PURPOSE_LISTING_VIDEO = 2;
+  // Profile picture. Public.
+  MEDIA_PURPOSE_AVATAR = 3;
+  // Photo of the weighbridge ticket (tarozi cheki) submitted in the escrow
+  // `receipt` step. OCR'd for weight and ticket number. Private to the
+  // transaction parties and staff.
+  MEDIA_PURPOSE_WEIGHBRIDGE_RECEIPT = 4;
+}
+
+// MediaStatus is where an upload is in the media pipeline.
+enum MediaStatus {
+  MEDIA_STATUS_UNSPECIFIED = 0;
+  // Upload slot issued; the file has not arrived yet.
+  MEDIA_STATUS_PENDING_UPLOAD = 1;
+  // File received; processing job queued or running.
+  MEDIA_STATUS_PROCESSING = 2;
+  // Processed renditions are available.
+  MEDIA_STATUS_READY = 3;
+  // Processing failed or the file was rejected; see media-pipeline for details.
+  MEDIA_STATUS_FAILED = 4;
+}
+
+// MediaRef attaches an uploaded media object to another resource (listing,
+// profile, transaction). In requests only `media_id` is read; the other
+// fields are output only and filled from media-pipeline results.
+message MediaRef {
+  // Media object id (UUID) issued by media-pipeline.
+  string media_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Output only. Image or video.
+  MediaType type = 2;
+
+  // Output only. Processing state; URLs are empty until READY.
+  MediaStatus status = 3;
+
+  // Output only. URL of the display rendition (image, or streaming manifest /
+  // MP4 for video). Signed and short-lived for private purposes.
+  string url = 4;
+
+  // Output only. Small image rendition or video poster frame.
+  string thumbnail_url = 5;
+}

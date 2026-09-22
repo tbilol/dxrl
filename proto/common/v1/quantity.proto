@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package agrogram.common.v1;
+
+import "buf/validate/validate.proto";
+
+// MassUnit is a unit of mass for goods and seeds.
+enum MassUnit {
+  MASS_UNIT_UNSPECIFIED = 0;
+  // Kilogram (kg) = 1 000 g.
+  MASS_UNIT_KILOGRAM = 1;
+  // Metric tonne (t) = 1 000 kg = 1 000 000 g. Default unit for listing quantities.
+  MASS_UNIT_TONNE = 2;
+}
+
+// Mass is an exact mass of goods or seed.
+//
+// The canonical value is an integer number of grams, so arithmetic is exact in
+// Go, Java and Python alike. `display_unit` only records the unit the user
+// typed (or prefers to see); it never changes the meaning of `grams`.
+//
+//   5.5 t  -> {grams: 5500000, display_unit: MASS_UNIT_TONNE}
+//   350 kg -> {grams: 350000,  display_unit: MASS_UNIT_KILOGRAM}
+//   0.4 kg -> {grams: 400,     display_unit: MASS_UNIT_KILOGRAM}  (tomato seed per ha)
+message Mass {
+  // Canonical mass in grams. Fields that need a strictly positive quantity say
+  // so with their own rule.
+  int64 grams = 1 [(buf.validate.field).int64.gte = 0];
+
+  // Unit to display the value in. Unspecified means "pick a sensible unit".
+  MassUnit display_unit = 2 [(buf.validate.field).enum.defined_only = true];
+}
+
+// AreaUnit is a unit of land area.
+enum AreaUnit {
+  AREA_UNIT_UNSPECIFIED = 0;
+  // Hectare (ga / га) = 10 000 m² = 100 sotix.
+  AREA_UNIT_HECTARE = 1;
+  // Sotix (sotka / сотка) = 100 m² = 0.01 ha. Usual unit for household plots (tomorqa).
+  AREA_UNIT_SOTIX = 2;
+  // Square meter (m²).
+  AREA_UNIT_SQUARE_METER = 3;
+}
+
+// Area is an exact land area. The canonical value is whole square meters.
+//
+//   2.5 ha    -> {square_meters: 25000, display_unit: AREA_UNIT_HECTARE}
+//   15 sotix  -> {square_meters: 1500,  display_unit: AREA_UNIT_SOTIX}
+message Area {
+  // Canonical area in square meters.
+  int64 square_meters = 1 [(buf.validate.field).int64.gte = 0];
+
+  // Unit to display the value in.
+  AreaUnit display_unit = 2 [(buf.validate.field).enum.defined_only = true];
+}

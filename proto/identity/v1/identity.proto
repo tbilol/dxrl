@@ -1,0 +1,226 @@
+syntax = "proto3";
+
+package agrogram.identity.v1;
+
+import "buf/validate/validate.proto";
+import "common/v1/address.proto";
+import "common/v1/auth.proto";
+import "common/v1/error.proto";
+import "common/v1/quantity.proto";
+import "common/v1/time.proto";
+import "google/protobuf/timestamp.proto";
+
+// IdentityService owns accounts: the role set, e-ijara farmer verification and
+// the plan.
+//
+// Every account holds ROLE_RESELLER from sign-up. ROLE_FARMER is added when
+// e-ijara confirms an active land-lease contract, and removed when that lease
+// ends. Other services see roles and premium as a token-time snapshot in the
+// `x-agrogram-*` metadata and call GetAccount when they need live values.
+service IdentityService {
+  // Internal (auth-gateway). Creates an account on a first sign-in, with
+  // ROLE_RESELLER and the Default plan. A retry with the same `request_id`
+  // returns the same account.
+  rpc CreateAccount(CreateAccountRequest) returns (CreateAccountResponse);
+
+  // Returns an account's roles, farmer verification status and plan. Users
+  // read their own account; staff and internal callers may read any.
+  rpc GetAccount(GetAccountRequest) returns (GetAccountResponse);
+
+  // Submits an e-ijara land-lease contract number to verify the caller as a
+  // farmer (dehqon). The check may finish in this call (VERIFIED or REJECTED)
+  // or later (PENDING; poll GetFarmerVerification). Verification grants
+  // ROLE_FARMER; the app refreshes its token to pick it up.
+  // TODO(e-ijara): the integration may start as a stub.
+  // Errors: LEASE_CONTRACT_INVALID, LEASE_CONTRACT_ALREADY_CLAIMED,
+  // DEPENDENCY_UNAVAILABLE (e-ijara down), ALREADY_EXISTS (already verified).
+  rpc SubmitFarmerVerification(SubmitFarmerVerificationRequest) returns (SubmitFarmerVerificationResponse);
+
+  // Returns a user's latest farmer verification. NOT_FOUND if they never
+  // submitted one.
+  rpc GetFarmerVerification(GetFarmerVerificationRequest) returns (GetFarmerVerificationResponse);
+}
+
+// Plan is a subscription plan. Limits live in the plan configuration; the
+// numbers below are today's.
+enum Plan {
+  PLAN_UNSPECIFIED = 0;
+  // Free: 5 sell offers and 5 buy-requests.
+  PLAN_DEFAULT = 1;
+  // Paid: 20 offers and 25 buy-requests, yield calculator, listing video,
+  // profile badge. TODO(billing): purchase and renewal are not designed.
+  PLAN_PREMIUM = 2;
+}
+
+// AccountStatus is whether an account may be used.
+enum AccountStatus {
+  ACCOUNT_STATUS_UNSPECIFIED = 0;
+  // Normal.
+  ACCOUNT_STATUS_ACTIVE = 1;
+  // Blocked by staff; sign-in fails with ACCOUNT_DISABLED.
+  ACCOUNT_STATUS_BLOCKED = 2;
+  // Deleted at the user's request (soft delete; history is kept).
+  ACCOUNT_STATUS_DELETED = 3;
+}
+
+// FarmerVerificationStatus is where an e-ijara farmer verification stands.
+enum FarmerVerificationStatus {
+  // Never submitted.
+  FARMER_VERIFICATION_STATUS_UNSPECIFIED = 0;
+  // Submitted; waiting for e-ijara.
+  FARMER_VERIFICATION_STATUS_PENDING = 1;
+  // Active lease confirmed; the account holds ROLE_FARMER.
+  FARMER_VERIFICATION_STATUS_VERIFIED = 2;
+  // e-ijara did not confirm the contract; see `rejection_reason`.
+  FARMER_VERIFICATION_STATUS_REJECTED = 3;
+  // The lease ended; ROLE_FARMER was removed until a new contract is verified.
+  FARMER_VERIFICATION_STATUS_EXPIRED = 4;
+}
+
+// Account is a user account as identity sees it. Names, avatars and other
+// public details are in profile-social; credentials are in auth-gateway.
+message Account {
+  // User id (UUID), shared by every service.
+  string id = 1;
+
+  // Roles held now.
+  repeated common.v1.Role roles = 2;
+
+  // Whether the account may be used.
+  AccountStatus status = 3;
+
+  // Current plan.
+  Plan plan = 4;
+
+  // Premium is active now (plan is PREMIUM and not past `premium_until`).
+  bool is_premium = 5;
+
+  // When the current Premium period ends. Unset on the Default plan.
+  google.protobuf.Timestamp premium_until = 6;
+
+  // Holds ROLE_FARMER.
+  bool is_verified_farmer = 7;
+
+  // Status of the latest farmer verification.
+  FarmerVerificationStatus farmer_verification_status = 8;
+
+  // Optimistic-concurrency version.
+  int64 version = 9;
+
+  // When the account was created.
+  google.protobuf.Timestamp created_at = 10;
+
+  // When the account last changed.
+  google.protobuf.Timestamp updated_at = 11;
+}
+
+// LandLease is the land-lease contract e-ijara returned for a verification.
+//
+// TODO(e-ijara): the field set follows what the e-ijara integration returns.
+message LandLease {
+  // Contract number as registered in e-ijara.
+  string contract_number = 1;
+
+  // Location of the leased land.
+  common.v1.Address location = 2;
+
+  // Leased area.
+  common.v1.Area area = 3;
+
+  // First day of the lease.
+  common.v1.Date valid_from = 4;
+
+  // Last day of the lease. The verification EXPIRES after it.
+  common.v1.Date valid_until = 5;
+}
+
+// FarmerVerification is one attempt to verify a user as a farmer through
+// e-ijara.
+message FarmerVerification {
+  // Verification id (UUID).
+  string id = 1;
+
+  // The user being verified.
+  string user_id = 2;
+
+  // Contract number the user submitted.
+  string lease_contract_number = 3;
+
+  // Current status.
+  FarmerVerificationStatus status = 4;
+
+  // Why it was rejected (status REJECTED): LEASE_CONTRACT_INVALID or
+  // LEASE_CONTRACT_ALREADY_CLAIMED.
+  common.v1.ErrorReason rejection_reason = 5;
+
+  // The lease as e-ijara returned it (status VERIFIED or EXPIRED).
+  LandLease lease = 6;
+
+  // When the user submitted it.
+  google.protobuf.Timestamp submitted_at = 7;
+
+  // When e-ijara's answer arrived (VERIFIED or REJECTED).
+  google.protobuf.Timestamp decided_at = 8;
+}
+
+// CreateAccountRequest is the input of CreateAccount.
+message CreateAccountRequest {
+  // Idempotency key (UUID). auth-gateway derives it from the sign-in identity,
+  // so a retried first sign-in never creates two accounts.
+  string request_id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+// CreateAccountResponse is the output of CreateAccount.
+message CreateAccountResponse {
+  // The new account.
+  Account account = 1;
+}
+
+// GetAccountRequest is the input of GetAccount.
+message GetAccountRequest {
+  // Account to read. Empty = the caller.
+  string user_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.uuid = true
+  ];
+}
+
+// GetAccountResponse is the output of GetAccount.
+message GetAccountResponse {
+  // The account.
+  Account account = 1;
+}
+
+// SubmitFarmerVerificationRequest is the input of SubmitFarmerVerification.
+message SubmitFarmerVerificationRequest {
+  // Idempotency key (UUID).
+  string request_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // e-ijara land-lease contract number, as printed on the contract.
+  string lease_contract_number = 2 [(buf.validate.field).string = {
+    min_len: 3
+    max_len: 64
+  }];
+}
+
+// SubmitFarmerVerificationResponse is the output of SubmitFarmerVerification.
+message SubmitFarmerVerificationResponse {
+  // The verification: PENDING, or already VERIFIED / REJECTED.
+  FarmerVerification verification = 1;
+}
+
+// GetFarmerVerificationRequest is the input of GetFarmerVerification.
+message GetFarmerVerificationRequest {
+  // User whose latest verification to read. Empty = the caller. Others'
+  // verifications are visible to staff only.
+  string user_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.uuid = true
+  ];
+}
+
+// GetFarmerVerificationResponse is the output of GetFarmerVerification.
+message GetFarmerVerificationResponse {
+  // The latest verification.
+  FarmerVerification verification = 1;
+}

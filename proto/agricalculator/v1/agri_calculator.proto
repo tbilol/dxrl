@@ -1,0 +1,138 @@
+syntax = "proto3";
+
+package agrogram.agricalculator.v1;
+
+import "buf/validate/validate.proto";
+import "common/v1/product.proto";
+import "common/v1/quantity.proto";
+
+// AgriCalculatorService estimates harvests from crop norms (Premium only;
+// PREMIUM_REQUIRED otherwise).
+//
+// Inputs keep the units the user typed (area in ha, sotix or m²; seed in kg
+// or tonnes) as `display_unit`, while the arithmetic uses the canonical
+// integers (square meters, grams). The same inputs always give the same
+// estimate, whatever the display units.
+service AgriCalculatorService {
+  // Estimates the harvest of a crop from its land area and the amount of seed
+  // sown.
+  rpc EstimateYield(EstimateYieldRequest) returns (EstimateYieldResponse);
+
+  // Returns the crop norms (seed rate and yield per hectare) the estimates use.
+  rpc ListCropNorms(ListCropNormsRequest) returns (ListCropNormsResponse);
+}
+
+// SeedAdequacy compares the seed amount with the norm for the area.
+enum SeedAdequacy {
+  SEED_ADEQUACY_UNSPECIFIED = 0;
+  // Perennial crop (fruit, nuts): no seed-based norm, `seed_amount` ignored.
+  SEED_ADEQUACY_NOT_APPLICABLE = 1;
+  // Less seed than the norm: the estimate drops in proportion.
+  SEED_ADEQUACY_BELOW_NORM = 2;
+  // Within the norm.
+  SEED_ADEQUACY_WITHIN_NORM = 3;
+  // More seed than the norm: the estimate gains little.
+  SEED_ADEQUACY_ABOVE_NORM = 4;
+}
+
+// CropNorm is the per-hectare reference data for one crop.
+message CropNorm {
+  // The crop.
+  common.v1.ProductType crop = 1;
+
+  // Annual crop sown from seed. False for perennials (fruit, nuts), which have
+  // no seed rate.
+  bool is_seed_based = 2;
+
+  // Lowest recommended seed per hectare.
+  common.v1.Mass seed_rate_min_per_hectare = 3;
+
+  // Highest recommended seed per hectare.
+  common.v1.Mass seed_rate_max_per_hectare = 4;
+
+  // Low-end yield per hectare.
+  common.v1.Mass yield_min_per_hectare = 5;
+
+  // Typical yield per hectare.
+  common.v1.Mass yield_typical_per_hectare = 6;
+
+  // High-end yield per hectare.
+  common.v1.Mass yield_max_per_hectare = 7;
+}
+
+// EstimateYieldRequest is the input of EstimateYield.
+message EstimateYieldRequest {
+  // Crop.
+  common.v1.ProductType crop = 1 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+
+  // Land area, entered in ha, sotix or m² (`display_unit`). More than 0 and at
+  // most 100 000 ha.
+  common.v1.Area area = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).cel = {
+      id: "estimate_yield.area_range"
+      message: "area must be more than 0 and at most 100000 ha"
+      expression: "this.square_meters > 0 && this.square_meters <= 1000000000"
+    }
+  ];
+
+  // Seed sown, entered in kg or tonnes (`display_unit`). Required for
+  // seed-based crops; ignored for perennials.
+  common.v1.Mass seed_amount = 3 [(buf.validate.field).cel = {
+    id: "estimate_yield.seed_amount_positive"
+    message: "seed_amount must be positive"
+    expression: "this.grams > 0"
+  }];
+}
+
+// EstimateYieldResponse is the output of EstimateYield.
+message EstimateYieldResponse {
+  // Expected harvest (display unit tonnes).
+  common.v1.Mass estimated_yield = 1;
+
+  // Low end of the range (about -10%).
+  common.v1.Mass estimated_yield_min = 2;
+
+  // High end of the range (about +10%).
+  common.v1.Mass estimated_yield_max = 3;
+
+  // Seed the norm recommends for this area. Unset for perennials.
+  common.v1.Mass recommended_seed_amount = 4;
+
+  // How the seed amount compares with the norm.
+  SeedAdequacy seed_adequacy = 5;
+
+  // The norm the estimate used.
+  CropNorm norm = 6;
+
+  // Version of the norms and formula, e.g. "2026.1", to tell estimates apart
+  // after the model changes.
+  string model_version = 7;
+}
+
+// ListCropNormsRequest is the input of ListCropNorms.
+message ListCropNormsRequest {
+  // Crops to return. Empty = all.
+  repeated common.v1.ProductType crops = 1 [(buf.validate.field).repeated = {
+    max_items: 100
+    unique: true
+    items: {
+      enum: {
+        defined_only: true
+        not_in: [0]
+      }
+    }
+  }];
+}
+
+// ListCropNormsResponse is the output of ListCropNorms.
+message ListCropNormsResponse {
+  // Norms, one per crop.
+  repeated CropNorm norms = 1;
+
+  // Version of the norms.
+  string model_version = 2;
+}

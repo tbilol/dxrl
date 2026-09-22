@@ -1,0 +1,371 @@
+syntax = "proto3";
+
+package agrogram.orderescrow.v1;
+
+import "buf/validate/validate.proto";
+import "common/v1/address.proto";
+import "common/v1/auth.proto";
+import "common/v1/market.proto";
+import "common/v1/money.proto";
+import "common/v1/pagination.proto";
+import "common/v1/product.proto";
+import "common/v1/quantity.proto";
+import "events/v1/transaction.proto";
+import "google/protobuf/timestamp.proto";
+
+// OrderEscrowService runs the escrow transaction (tranzaksiya) between a
+// farmer (seller) and a reseller (buyer).
+//
+// The reseller pays the total into escrow; the funds are released to the
+// farmer only after the goods are weighed, handed over and received. States,
+// steps and the events published on agrogram.orderescrow.transaction.v1 are
+// described in events/v1/transaction.proto.
+//
+// Every command checks the caller is the right party for the step
+// (NOT_TRANSACTION_PARTY) and that the transaction is in the right state
+// (INVALID_STATE_TRANSITION, with metadata {"state", "command"}). Commands
+// are idempotent on `request_id`.
+//
+// Stubs: TODO(payments) - no payment provider, so money does not move; the
+// pay-in is held and the payout released at once. TODO(tax) - tax is always
+// zero. TODO(weighbridge) - receipts are accepted without checks.
+// TODO(bonus) - the bonus rule is not designed.
+service OrderEscrowService {
+  // Starts a transaction on a listing. The caller is the counterparty of the
+  // listing's owner: a reseller on a farmer's offer, or a farmer (ROLE_FARMER)
+  // on a reseller's buy-request. order-escrow snapshots the listing through
+  // catalog GetListing. If the caller already has an open transaction on the
+  // listing, that one is returned instead of a new one.
+  // Errors: LISTING_NOT_ACTIVE, INSUFFICIENT_QUANTITY, SELF_TRADE_NOT_ALLOWED,
+  // FARMER_VERIFICATION_REQUIRED.
+  rpc CreateTransaction(CreateTransactionRequest) returns (CreateTransactionResponse);
+
+  // Reseller. Pays the total into escrow (AWAITING_PAYMENT -> PAYMENT_HELD,
+  // PaymentHeld).
+  // TODO(payments): with a provider this returns a checkout URL and the state
+  // changes when the provider confirms. The stub holds the funds at once.
+  // Errors: PAYMENT_FAILED.
+  rpc PayIn(PayInRequest) returns (PayInResponse);
+
+  // Reseller. Submits the weighbridge receipt (tarozi cheki) after collecting
+  // and weighing the goods (PAYMENT_HELD -> RECEIPT_SUBMITTED,
+  // ReceiptSubmitted). Upload the photo first through media-pipeline with
+  // purpose MEDIA_PURPOSE_WEIGHBRIDGE_RECEIPT.
+  // Errors: RECEIPT_REJECTED.
+  rpc SubmitWeighbridgeReceipt(SubmitWeighbridgeReceiptRequest) returns (SubmitWeighbridgeReceiptResponse);
+
+  // Farmer. Confirms handing the goods over (RECEIPT_SUBMITTED -> HANDED_OVER,
+  // ProductHandover).
+  rpc ConfirmHandover(ConfirmHandoverRequest) returns (ConfirmHandoverResponse);
+
+  // Reseller. Confirms receiving the goods (HANDED_OVER -> RECEIVED,
+  // ReceiptConfirmed). order-escrow then releases the payout (-> COMPLETED,
+  // PayoutReleased, then BonusAwarded).
+  rpc ConfirmReceipt(ConfirmReceiptRequest) returns (ConfirmReceiptResponse);
+
+  // Returns a transaction and its current state. Visible to its two parties
+  // and to staff.
+  rpc GetTransaction(GetTransactionRequest) returns (GetTransactionResponse);
+
+  // Lists the caller's transactions, newest first.
+  rpc ListTransactions(ListTransactionsRequest) returns (ListTransactionsResponse);
+}
+
+// Transaction is an escrow transaction as its parties see it.
+message Transaction {
+  // Transaction id (UUID).
+  string id = 1;
+
+  // Listing it was started from.
+  string listing_id = 2;
+
+  // Board of that listing: an offer (owned by the farmer) or a buy-request
+  // (owned by the reseller).
+  common.v1.ListingKind listing_kind = 3;
+
+  // Seller (dehqon).
+  string farmer_id = 4;
+
+  // Buyer (olib sotuvchi).
+  string reseller_id = 5;
+
+  // Product, from the listing.
+  common.v1.ProductType product = 6;
+
+  // Agreed quantity.
+  common.v1.Mass quantity = 7;
+
+  // Agreed price per kg or tonne.
+  common.v1.UnitPrice unit_price = 8;
+
+  // Where the goods change hands: the listing's address at creation.
+  common.v1.Address address = 9;
+
+  // Subtotal, tax (TODO(tax)), fee, total and payout.
+  agrogram.events.v1.TransactionAmounts amounts = 10;
+
+  // Current state.
+  agrogram.events.v1.TransactionState state = 11;
+
+  // The pay-in, once made.
+  Payment payment = 12;
+
+  // The weighbridge receipt, once submitted.
+  agrogram.events.v1.WeighbridgeReceipt receipt = 13;
+
+  // The payout, once released.
+  Payout payout = 14;
+
+  // Bonus points awarded on completion. TODO(bonus).
+  int64 bonus_points = 15;
+
+  // The caller's side: ROLE_FARMER or ROLE_RESELLER; ROLE_ADMIN for staff.
+  common.v1.Role my_role = 16;
+
+  // Every state change, oldest first.
+  repeated TransactionStateChange history = 17;
+
+  // Optimistic-concurrency version.
+  int64 version = 18;
+
+  // When the transaction was created.
+  google.protobuf.Timestamp created_at = 19;
+
+  // When the transaction last changed.
+  google.protobuf.Timestamp updated_at = 20;
+
+  // When the payout was released.
+  google.protobuf.Timestamp completed_at = 21;
+}
+
+// Payment is the reseller's pay-in into escrow.
+//
+// TODO(payments): the provider (Payme, Click, bank transfer, ...) is not
+// chosen. Until then `provider` is "stub", `provider_payment_id` is empty and
+// no money moves.
+message Payment {
+  // Payment provider.
+  string provider = 1;
+
+  // The provider's id for this payment.
+  string provider_payment_id = 2;
+
+  // Amount paid in; equals amounts.total.
+  common.v1.Money amount = 3;
+
+  // When escrow started holding the funds.
+  google.protobuf.Timestamp held_at = 4;
+}
+
+// Payout is the release of the escrowed funds to the farmer.
+//
+// TODO(payments): same stub as Payment. TODO(tax): the amount may later
+// exclude withheld tax.
+message Payout {
+  // Payment provider.
+  string provider = 1;
+
+  // The provider's id for this payout.
+  string provider_payout_id = 2;
+
+  // Amount paid out; equals amounts.payout_amount.
+  common.v1.Money amount = 3;
+
+  // When the payout was released.
+  google.protobuf.Timestamp released_at = 4;
+}
+
+// TransactionStateChange is one entry in a transaction's history.
+message TransactionStateChange {
+  // State entered.
+  agrogram.events.v1.TransactionState state = 1;
+
+  // Who caused it: a party, or order-escrow for system steps.
+  common.v1.Actor actor = 2;
+
+  // When it happened.
+  google.protobuf.Timestamp changed_at = 3;
+}
+
+// CreateTransactionRequest is the input of CreateTransaction.
+message CreateTransactionRequest {
+  // Idempotency key (UUID).
+  string request_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Listing to trade on.
+  string listing_id = 2 [(buf.validate.field).string.uuid = true];
+
+  // Quantity to trade. Unset = everything the listing still has.
+  common.v1.Mass quantity = 3 [(buf.validate.field).cel = {
+    id: "create_transaction.quantity_positive"
+    message: "quantity must be positive"
+    expression: "this.grams > 0"
+  }];
+
+  // Agreed price, for a listing without a price (negotiable). Must be unset
+  // when the listing has a price, which is then used.
+  // TODO(negotiation): there is no step where the listing owner accepts this
+  // price; for now they accept by carrying on with the transaction.
+  common.v1.UnitPrice unit_price = 4 [(buf.validate.field).cel = {
+    id: "create_transaction.unit_price_positive_uzs"
+    message: "unit_price must be a positive amount in UZS"
+    expression: "this.amount.currency_code == 'UZS' && this.amount.amount_minor > 0"
+  }];
+}
+
+// CreateTransactionResponse is the output of CreateTransaction.
+message CreateTransactionResponse {
+  // The transaction (AWAITING_PAYMENT), or the caller's existing open one on
+  // the listing.
+  Transaction transaction = 1;
+}
+
+// PayInRequest is the input of PayIn.
+message PayInRequest {
+  // Idempotency key (UUID).
+  string request_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Transaction to pay for.
+  string transaction_id = 2 [(buf.validate.field).string.uuid = true];
+
+  // Where the provider sends the user after checkout.
+  // TODO(payments): used once a provider is integrated; ignored by the stub.
+  string return_url = 3 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.uri = true
+  ];
+}
+
+// PayInResponse is the output of PayIn.
+message PayInResponse {
+  // The transaction after the call. With the stub it is already PAYMENT_HELD.
+  Transaction transaction = 1;
+
+  // Provider checkout page to open.
+  // TODO(payments): always empty with the stub.
+  string checkout_url = 2;
+}
+
+// SubmitWeighbridgeReceiptRequest is the input of SubmitWeighbridgeReceipt.
+// Give the ticket number, the photo, or both.
+message SubmitWeighbridgeReceiptRequest {
+  option (buf.validate.message).cel = {
+    id: "submit_weighbridge_receipt.ticket_or_photo"
+    message: "ticket_number or photo_media_id is required"
+    expression: "this.ticket_number != '' || this.photo_media_id != ''"
+  };
+
+  // Idempotency key (UUID).
+  string request_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Transaction the receipt is for.
+  string transaction_id = 2 [(buf.validate.field).string.uuid = true];
+
+  // Ticket number as printed on the receipt.
+  string ticket_number = 3 [(buf.validate.field).string.max_len = 64];
+
+  // Photo of the ticket: a media-pipeline upload with purpose
+  // MEDIA_PURPOSE_WEIGHBRIDGE_RECEIPT attached to this transaction.
+  string photo_media_id = 4 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.uuid = true
+  ];
+
+  // Net weight on the ticket, if the user typed it in.
+  common.v1.Mass net_mass = 5 [(buf.validate.field).cel = {
+    id: "submit_weighbridge_receipt.net_mass_positive"
+    message: "net_mass must be positive"
+    expression: "this.grams > 0"
+  }];
+}
+
+// SubmitWeighbridgeReceiptResponse is the output of SubmitWeighbridgeReceipt.
+message SubmitWeighbridgeReceiptResponse {
+  // The transaction (RECEIPT_SUBMITTED).
+  Transaction transaction = 1;
+}
+
+// ConfirmHandoverRequest is the input of ConfirmHandover.
+message ConfirmHandoverRequest {
+  // Idempotency key (UUID).
+  string request_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Transaction whose goods were handed over.
+  string transaction_id = 2 [(buf.validate.field).string.uuid = true];
+}
+
+// ConfirmHandoverResponse is the output of ConfirmHandover.
+message ConfirmHandoverResponse {
+  // The transaction (HANDED_OVER).
+  Transaction transaction = 1;
+}
+
+// ConfirmReceiptRequest is the input of ConfirmReceipt.
+message ConfirmReceiptRequest {
+  // Idempotency key (UUID).
+  string request_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Transaction whose goods were received.
+  string transaction_id = 2 [(buf.validate.field).string.uuid = true];
+}
+
+// ConfirmReceiptResponse is the output of ConfirmReceipt.
+message ConfirmReceiptResponse {
+  // The transaction: RECEIVED, or already COMPLETED once the payout is out.
+  Transaction transaction = 1;
+}
+
+// GetTransactionRequest is the input of GetTransaction.
+message GetTransactionRequest {
+  // Transaction to read.
+  string transaction_id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+// GetTransactionResponse is the output of GetTransaction.
+message GetTransactionResponse {
+  // The transaction.
+  Transaction transaction = 1;
+}
+
+// ListTransactionsRequest is the input of ListTransactions.
+message ListTransactionsRequest {
+  // The caller's side: ROLE_FARMER (sales) or ROLE_RESELLER (purchases).
+  // Unspecified = both.
+  common.v1.Role role = 1 [(buf.validate.field).enum = {
+    in: [
+      0,
+      1,
+      2
+    ]
+  }];
+
+  // States to include. Empty = all.
+  repeated agrogram.events.v1.TransactionState states = 2 [(buf.validate.field).repeated = {
+    max_items: 6
+    unique: true
+    items: {
+      enum: {
+        defined_only: true
+        not_in: [0]
+      }
+    }
+  }];
+
+  // Only transactions started from this listing.
+  string listing_id = 3 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.uuid = true
+  ];
+
+  // Page to read.
+  common.v1.PageRequest page = 4;
+}
+
+// ListTransactionsResponse is the output of ListTransactions.
+message ListTransactionsResponse {
+  // Transactions, newest first.
+  repeated Transaction transactions = 1;
+
+  // Next-page cursor.
+  common.v1.PageResponse page = 2;
+}

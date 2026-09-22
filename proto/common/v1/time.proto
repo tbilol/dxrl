@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package agrogram.common.v1;
+
+import "buf/validate/validate.proto";
+import "google/protobuf/timestamp.proto";
+
+// Timestamps: every instant in the API is a google.protobuf.Timestamp (UTC).
+// Field names end in `_at` (created_at, verified_at, occurred_at) to match the
+// JSON the front-end already uses. Calendar-day logic ("today", "this week")
+// uses the Asia/Tashkent time zone (UTC+5, no DST).
+
+// TimeRange is a half-open interval [start, end). Either bound may be unset,
+// which leaves that side open.
+message TimeRange {
+  option (buf.validate.message).cel = {
+    id: "time_range.order"
+    message: "start must be before end"
+    expression: "!has(this.start) || !has(this.end) || this.start < this.end"
+  };
+
+  // Inclusive lower bound.
+  google.protobuf.Timestamp start = 1;
+
+  // Exclusive upper bound.
+  google.protobuf.Timestamp end = 2;
+}
+
+// Date is a calendar date with no time or time zone (same shape as
+// google.type.Date). Used for civil/legal dates such as land-lease validity.
+message Date {
+  // Year, e.g. 2026.
+  int32 year = 1 [(buf.validate.field).int32 = {
+    gte: 1900
+    lte: 9999
+  }];
+
+  // Month of year, 1-12.
+  int32 month = 2 [(buf.validate.field).int32 = {
+    gte: 1
+    lte: 12
+  }];
+
+  // Day of month, 1-31 (validated against the month by services).
+  int32 day = 3 [(buf.validate.field).int32 = {
+    gte: 1
+    lte: 31
+  }];
+}

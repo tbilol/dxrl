@@ -1,0 +1,480 @@
+syntax = "proto3";
+
+package agrogram.authgateway.v1;
+
+import "buf/validate/validate.proto";
+import "common/v1/auth.proto";
+import "google/protobuf/timestamp.proto";
+
+// AuthGatewayService signs users in and issues the tokens the api-gateway
+// checks.
+//
+// Sign-in methods are Google, Apple (iCloud) and an Uzbek phone number with a
+// password. An access token is a short-lived signed JWT whose claims are the
+// `x-agrogram-*` headers the edge forwards (see common/v1/auth.proto). A
+// refresh token is opaque and single-use: every refresh rotates it, and
+// reusing an old one revokes the whole session. Accounts, roles and the
+// premium flag belong to identity; auth-gateway calls identity when it creates
+// an account and whenever it issues tokens.
+//
+// Callable without an access token: SignIn, RequestPhoneCode,
+// SignUpWithPhone, ResetPassword, RefreshToken, GetJwks. Internal only
+// (api-gateway): VerifyToken.
+service AuthGatewayService {
+  // Signs in with a Google ID token, an Apple identity token, or a phone
+  // number and password, and opens a session. The first Google or Apple
+  // sign-in creates the account (`is_new_account`); phone accounts are created
+  // with SignUpWithPhone.
+  // Errors: INVALID_CREDENTIALS, ACCOUNT_DISABLED.
+  rpc SignIn(SignInRequest) returns (SignInResponse);
+
+  // Sends a one-time SMS code to a phone number, for sign-up, password reset
+  // or linking a phone to an account. The code goes out through notification's
+  // SendNotification RPC, never through Kafka.
+  // Errors: RATE_LIMITED, PHONE_ALREADY_REGISTERED (sign-up and link).
+  rpc RequestPhoneCode(RequestPhoneCodeRequest) returns (RequestPhoneCodeResponse);
+
+  // Creates a phone + password account from a verified SMS code and signs it
+  // in. The app then creates the profile (profile-social CreateProfile).
+  // Errors: OTP_INVALID, PHONE_ALREADY_REGISTERED.
+  rpc SignUpWithPhone(SignUpWithPhoneRequest) returns (SignUpWithPhoneResponse);
+
+  // Sets a new password with a verified SMS code and ends every session of the
+  // account.
+  // Errors: OTP_INVALID.
+  rpc ResetPassword(ResetPasswordRequest) returns (ResetPasswordResponse);
+
+  // Adds a sign-in method to the caller's account.
+  // Errors: PROVIDER_ALREADY_LINKED, PHONE_ALREADY_REGISTERED, OTP_INVALID.
+  rpc LinkSignInMethod(LinkSignInMethodRequest) returns (LinkSignInMethodResponse);
+
+  // Removes a sign-in method from the caller's account.
+  // Errors: LAST_SIGN_IN_METHOD.
+  rpc UnlinkSignInMethod(UnlinkSignInMethodRequest) returns (UnlinkSignInMethodResponse);
+
+  // Lists the sign-in methods linked to the caller's account.
+  rpc ListSignInMethods(ListSignInMethodsRequest) returns (ListSignInMethodsResponse);
+
+  // Exchanges a refresh token for a new token pair. Roles and premium are
+  // re-read from identity, so the new access token carries current values.
+  // Errors: TOKEN_EXPIRED, TOKEN_INVALID, TOKEN_REVOKED.
+  rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+
+  // Ends the caller's current session or all of their sessions. Their refresh
+  // tokens stop working at once; access tokens already issued run out on
+  // their own.
+  rpc SignOut(SignOutRequest) returns (SignOutResponse);
+
+  // Internal (api-gateway). Checks an access token's signature, expiry and
+  // session, and returns the principal to forward as `x-agrogram-*` metadata.
+  // Errors: TOKEN_EXPIRED, TOKEN_INVALID, TOKEN_REVOKED.
+  rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
+
+  // Returns the public keys that sign access tokens, as a JWKS document, so
+  // the api-gateway can verify tokens locally.
+  rpc GetJwks(GetJwksRequest) returns (GetJwksResponse);
+}
+
+// SignInMethod is a way to sign in to an account.
+enum SignInMethod {
+  SIGN_IN_METHOD_UNSPECIFIED = 0;
+  // Google account (OpenID Connect).
+  SIGN_IN_METHOD_GOOGLE = 1;
+  // Sign in with Apple (iCloud account).
+  SIGN_IN_METHOD_APPLE = 2;
+  // Uzbek mobile number and password.
+  SIGN_IN_METHOD_PHONE_PASSWORD = 3;
+}
+
+// PhoneCodePurpose is what a one-time SMS code will be used for. A code only
+// works for its purpose.
+enum PhoneCodePurpose {
+  PHONE_CODE_PURPOSE_UNSPECIFIED = 0;
+  // SignUpWithPhone. The number must not belong to an account yet.
+  PHONE_CODE_PURPOSE_SIGN_UP = 1;
+  // ResetPassword. The number must belong to an account.
+  PHONE_CODE_PURPOSE_RESET_PASSWORD = 2;
+  // LinkSignInMethod with a phone. The number must not belong to an account yet.
+  PHONE_CODE_PURPOSE_LINK_PHONE = 3;
+}
+
+// ClientPlatform is the kind of app a session was opened from.
+enum ClientPlatform {
+  CLIENT_PLATFORM_UNSPECIFIED = 0;
+  // Browser (the React app).
+  CLIENT_PLATFORM_WEB = 1;
+  // Android app.
+  CLIENT_PLATFORM_ANDROID = 2;
+  // iOS app.
+  CLIENT_PLATFORM_IOS = 3;
+}
+
+// SignOutScope says which sessions SignOut ends.
+enum SignOutScope {
+  SIGN_OUT_SCOPE_UNSPECIFIED = 0;
+  // Only the session of the calling access token. Default.
+  SIGN_OUT_SCOPE_CURRENT_SESSION = 1;
+  // Every session of the account, on every device.
+  SIGN_OUT_SCOPE_ALL_SESSIONS = 2;
+}
+
+// ClientInfo describes the device a session is opened on. It is shown in
+// session lists and used for abuse detection.
+message ClientInfo {
+  // App platform.
+  ClientPlatform platform = 1 [(buf.validate.field).enum.defined_only = true];
+
+  // Stable per-install id generated by the app.
+  string device_id = 2 [(buf.validate.field).string.max_len = 128];
+
+  // App version, e.g. "1.4.0".
+  string app_version = 3 [(buf.validate.field).string.max_len = 32];
+
+  // Human-readable device name, e.g. "Pixel 8" or "Chrome on Windows".
+  string device_name = 4 [(buf.validate.field).string.max_len = 128];
+}
+
+// GoogleCredential is the result of Google Sign-In on the client.
+message GoogleCredential {
+  // OpenID Connect ID token issued by Google for AGROGRAM's client id.
+  string id_token = 1 [
+    debug_redact = true,
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 8192
+    }
+  ];
+
+  // Nonce the app sent to Google, if any; must match the token's `nonce` claim.
+  string nonce = 2 [(buf.validate.field).string.max_len = 256];
+}
+
+// AppleCredential is the result of Sign in with Apple on the client.
+message AppleCredential {
+  // Identity token (JWT) issued by Apple.
+  string identity_token = 1 [
+    debug_redact = true,
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 8192
+    }
+  ];
+
+  // Authorization code, exchanged server-side for Apple refresh tokens (needed
+  // to revoke the link when the account is deleted).
+  string authorization_code = 2 [
+    debug_redact = true,
+    (buf.validate.field).string.max_len = 1024
+  ];
+
+  // Nonce the app sent to Apple (raw value; Apple returns its SHA-256).
+  string nonce = 3 [(buf.validate.field).string.max_len = 256];
+}
+
+// PhonePasswordCredential signs in with a phone number and password.
+message PhonePasswordCredential {
+  // Uzbek mobile number in E.164 form, e.g. "+998901234567".
+  string phone_number = 1 [(buf.validate.field).string.pattern = "^\\+998[0-9]{9}$"];
+
+  // Account password.
+  string password = 2 [
+    debug_redact = true,
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 128
+    }
+  ];
+}
+
+// PhoneCodeVerification proves control of a phone number with the SMS code
+// sent by RequestPhoneCode.
+message PhoneCodeVerification {
+  // `challenge_id` from RequestPhoneCodeResponse.
+  string challenge_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // The code from the SMS.
+  string code = 2 [
+    debug_redact = true,
+    (buf.validate.field).string.pattern = "^[0-9]{4,8}$"
+  ];
+}
+
+// PhonePasswordSetup attaches a verified phone number and a new password to
+// an account (sign-up, or linking a phone to an existing account).
+message PhonePasswordSetup {
+  // Uzbek mobile number in E.164 form. Must be the number the code was sent to.
+  string phone_number = 1 [(buf.validate.field).string.pattern = "^\\+998[0-9]{9}$"];
+
+  // Proof of the phone number.
+  PhoneCodeVerification verification = 2 [(buf.validate.field).required = true];
+
+  // New password, 8-128 characters.
+  string password = 3 [
+    debug_redact = true,
+    (buf.validate.field).string = {
+      min_len: 8
+      max_len: 128
+    }
+  ];
+}
+
+// TokenPair is an access token plus the refresh token that renews it.
+message TokenPair {
+  // Signed JWT sent as `authorization: Bearer <token>`. Lives minutes.
+  string access_token = 1 [debug_redact = true];
+
+  // When the access token expires.
+  google.protobuf.Timestamp access_token_expires_at = 2;
+
+  // Opaque, single-use refresh token. Lives weeks; rotates on every refresh.
+  string refresh_token = 3 [debug_redact = true];
+
+  // When the refresh token expires.
+  google.protobuf.Timestamp refresh_token_expires_at = 4;
+}
+
+// LinkedSignInMethod is a sign-in method linked to an account.
+message LinkedSignInMethod {
+  // The method.
+  SignInMethod method = 1;
+
+  // Masked identifier for display, e.g. "a***@gmail.com" or "+998 90 *** ** 67".
+  string display_hint = 2;
+
+  // When the method was linked.
+  google.protobuf.Timestamp linked_at = 3;
+
+  // Last successful sign-in with this method.
+  google.protobuf.Timestamp last_used_at = 4;
+}
+
+// JsonWebKey is one public signing key in JWKS form (RFC 7517). Field names
+// match the JSON member names, so the JSON transcoding of GetJwksResponse is a
+// valid JWKS document.
+message JsonWebKey {
+  // Key id; matches the `kid` header of the tokens it signed.
+  string kid = 1;
+
+  // Key type: "EC" or "RSA".
+  string kty = 2;
+
+  // Signing algorithm, e.g. "ES256".
+  string alg = 3;
+
+  // Always "sig".
+  string use = 4;
+
+  // Curve for EC keys, e.g. "P-256".
+  string crv = 5;
+
+  // EC x coordinate, base64url.
+  string x = 6;
+
+  // EC y coordinate, base64url.
+  string y = 7;
+
+  // RSA modulus, base64url.
+  string n = 8;
+
+  // RSA exponent, base64url.
+  string e = 9;
+}
+
+// SignInRequest is the input of SignIn.
+message SignInRequest {
+  // How the user signs in.
+  oneof credential {
+    option (buf.validate.oneof).required = true;
+
+    // Google Sign-In.
+    GoogleCredential google = 1;
+
+    // Sign in with Apple.
+    AppleCredential apple = 2;
+
+    // Phone number and password.
+    PhonePasswordCredential phone_password = 3;
+  }
+
+  // Device the session is opened on.
+  ClientInfo client = 4;
+}
+
+// SignInResponse is the output of SignIn.
+message SignInResponse {
+  // The account signed in to.
+  string user_id = 1;
+
+  // The new session.
+  string session_id = 2;
+
+  // Tokens for the session.
+  TokenPair tokens = 3;
+
+  // True when this sign-in created the account (first Google or Apple
+  // sign-in). The app then creates the profile (profile-social CreateProfile).
+  bool is_new_account = 4;
+}
+
+// RequestPhoneCodeRequest is the input of RequestPhoneCode.
+message RequestPhoneCodeRequest {
+  // Uzbek mobile number in E.164 form.
+  string phone_number = 1 [(buf.validate.field).string.pattern = "^\\+998[0-9]{9}$"];
+
+  // What the code will be used for.
+  PhoneCodePurpose purpose = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+}
+
+// RequestPhoneCodeResponse is the output of RequestPhoneCode.
+message RequestPhoneCodeResponse {
+  // Id of this code challenge; send it back with the code.
+  string challenge_id = 1;
+
+  // When the code stops working.
+  google.protobuf.Timestamp expires_at = 2;
+
+  // Earliest time another code may be requested for this number.
+  google.protobuf.Timestamp resend_available_at = 3;
+}
+
+// SignUpWithPhoneRequest is the input of SignUpWithPhone.
+message SignUpWithPhoneRequest {
+  // Idempotency key (UUID). A retry with the same key returns the same account.
+  string request_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Verified phone number and the password to set.
+  PhonePasswordSetup phone_password = 2 [(buf.validate.field).required = true];
+
+  // Device the session is opened on.
+  ClientInfo client = 3;
+}
+
+// SignUpWithPhoneResponse is the output of SignUpWithPhone.
+message SignUpWithPhoneResponse {
+  // The new account.
+  string user_id = 1;
+
+  // The new session.
+  string session_id = 2;
+
+  // Tokens for the session.
+  TokenPair tokens = 3;
+}
+
+// ResetPasswordRequest is the input of ResetPassword.
+message ResetPasswordRequest {
+  // Verified phone number of the account and its new password.
+  PhonePasswordSetup phone_password = 1 [(buf.validate.field).required = true];
+}
+
+// ResetPasswordResponse is the output of ResetPassword. Every session of the
+// account has ended; the app signs in again with the new password.
+message ResetPasswordResponse {}
+
+// LinkSignInMethodRequest is the input of LinkSignInMethod.
+message LinkSignInMethodRequest {
+  // The method to add.
+  oneof method {
+    option (buf.validate.oneof).required = true;
+
+    // A Google account.
+    GoogleCredential google = 1;
+
+    // An Apple account.
+    AppleCredential apple = 2;
+
+    // A phone number and password.
+    PhonePasswordSetup phone_password = 3;
+  }
+}
+
+// LinkSignInMethodResponse is the output of LinkSignInMethod.
+message LinkSignInMethodResponse {
+  // All methods now linked to the account.
+  repeated LinkedSignInMethod methods = 1;
+}
+
+// UnlinkSignInMethodRequest is the input of UnlinkSignInMethod.
+message UnlinkSignInMethodRequest {
+  // The method to remove.
+  SignInMethod method = 1 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+}
+
+// UnlinkSignInMethodResponse is the output of UnlinkSignInMethod.
+message UnlinkSignInMethodResponse {
+  // Methods still linked to the account.
+  repeated LinkedSignInMethod methods = 1;
+}
+
+// ListSignInMethodsRequest is the input of ListSignInMethods. The account is
+// the caller's.
+message ListSignInMethodsRequest {}
+
+// ListSignInMethodsResponse is the output of ListSignInMethods.
+message ListSignInMethodsResponse {
+  // Methods linked to the account.
+  repeated LinkedSignInMethod methods = 1;
+}
+
+// RefreshTokenRequest is the input of RefreshToken.
+message RefreshTokenRequest {
+  // The current refresh token.
+  string refresh_token = 1 [
+    debug_redact = true,
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 1024
+    }
+  ];
+}
+
+// RefreshTokenResponse is the output of RefreshToken.
+message RefreshTokenResponse {
+  // New tokens. The old refresh token no longer works.
+  TokenPair tokens = 1;
+}
+
+// SignOutRequest is the input of SignOut.
+message SignOutRequest {
+  // Which sessions to end. Unspecified = the current session.
+  SignOutScope scope = 1 [(buf.validate.field).enum.defined_only = true];
+}
+
+// SignOutResponse is the output of SignOut.
+message SignOutResponse {}
+
+// VerifyTokenRequest is the input of VerifyToken.
+message VerifyTokenRequest {
+  // Access token from the `authorization` header, without "Bearer ".
+  string access_token = 1 [
+    debug_redact = true,
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 8192
+    }
+  ];
+}
+
+// VerifyTokenResponse is the output of VerifyToken.
+message VerifyTokenResponse {
+  // Who the token belongs to, as the edge forwards it.
+  common.v1.Principal principal = 1;
+
+  // When the token expires.
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+// GetJwksRequest is the input of GetJwks.
+message GetJwksRequest {}
+
+// GetJwksResponse is the output of GetJwks: a JWKS document.
+message GetJwksResponse {
+  // Current and recently rotated signing keys.
+  repeated JsonWebKey keys = 1;
+}

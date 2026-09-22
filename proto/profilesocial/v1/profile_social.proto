@@ -1,0 +1,420 @@
+syntax = "proto3";
+
+package agrogram.profilesocial.v1;
+
+import "buf/validate/validate.proto";
+import "common/v1/address.proto";
+import "common/v1/market.proto";
+import "common/v1/media.proto";
+import "common/v1/money.proto";
+import "common/v1/pagination.proto";
+import "common/v1/product.proto";
+import "common/v1/quantity.proto";
+import "events/v1/listing.proto";
+import "events/v1/profile.proto";
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+
+// ProfileSocialService owns public profiles, follows and ratings, and serves
+// each user's own listings.
+//
+// A profile's id is its user id. The service publishes the profile stream
+// (agrogram.profilesocial.profile.v1) and consumes the listing stream (for
+// ListUserListings) and the transaction stream (deal counts; a completed
+// transaction unlocks ratings between its two parties).
+service ProfileSocialService {
+  // Creates the caller's profile, normally right after the first sign-in.
+  // Errors: ALREADY_EXISTS.
+  rpc CreateProfile(CreateProfileRequest) returns (CreateProfileResponse);
+
+  // Returns a public profile.
+  rpc GetProfile(GetProfileRequest) returns (GetProfileResponse);
+
+  // Updates the caller's profile.
+  rpc UpdateProfile(UpdateProfileRequest) returns (UpdateProfileResponse);
+
+  // Deletes a profile. Soft delete: it disappears from lists and search, while
+  // ratings and transaction history stay.
+  rpc DeleteProfile(DeleteProfileRequest) returns (DeleteProfileResponse);
+
+  // Follows a user. Following someone already followed is a no-op.
+  // Errors: SELF_ACTION_NOT_ALLOWED.
+  rpc FollowUser(FollowUserRequest) returns (FollowUserResponse);
+
+  // Unfollows a user. Unfollowing someone not followed is a no-op.
+  rpc UnfollowUser(UnfollowUserRequest) returns (UnfollowUserResponse);
+
+  // Lists the users who follow a user, newest first.
+  rpc ListFollowers(ListFollowersRequest) returns (ListFollowersResponse);
+
+  // Lists the users a user follows, newest first.
+  rpc ListFollowing(ListFollowingRequest) returns (ListFollowingResponse);
+
+  // Rates the other party of a completed transaction, once per transaction and
+  // rater. Publishes RatingUpdated for the rated user.
+  // Errors: RATING_NOT_ALLOWED, ALREADY_RATED.
+  rpc RateUser(RateUserRequest) returns (RateUserResponse);
+
+  // Lists the ratings a user received, newest first.
+  rpc ListRatings(ListRatingsRequest) returns (ListRatingsResponse);
+
+  // Lists a user's listings on both boards, newest first. Other users see
+  // ACTIVE listings only; the owner may ask for any status.
+  rpc ListUserListings(ListUserListingsRequest) returns (ListUserListingsResponse);
+}
+
+// Profile is a user's public profile.
+message Profile {
+  // Output only. User id (UUID).
+  string id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.uuid = true
+  ];
+
+  // Display name, 2-80 characters. Required on create.
+  string display_name = 2 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string = {
+      min_len: 2
+      max_len: 80
+    }
+  ];
+
+  // Profile picture: a media-pipeline upload with purpose MEDIA_PURPOSE_AVATAR.
+  common.v1.MediaRef avatar = 3;
+
+  // Short self-description.
+  string bio = 4 [(buf.validate.field).string.max_len = 500];
+
+  // Home region.
+  common.v1.Region region = 5 [(buf.validate.field).enum.defined_only = true];
+
+  // District or city within the region.
+  string district = 6 [(buf.validate.field).string.max_len = 120];
+
+  // Output only. Aggregate rating.
+  agrogram.events.v1.RatingSummary rating = 7;
+
+  // Output only. Completed escrow transactions, as farmer or reseller.
+  int64 deals_count = 8;
+
+  // Output only. Users following this user.
+  int64 follower_count = 9;
+
+  // Output only. Users this user follows.
+  int64 following_count = 10;
+
+  // Output only. E-ijara-verified farmer, mirrored from identity.
+  bool is_verified_farmer = 11;
+
+  // Output only. Premium plan active (badge), mirrored from identity.
+  bool is_premium = 12;
+
+  // Output only. The caller follows this user.
+  bool is_followed_by_me = 13;
+
+  // Output only. Optimistic-concurrency version.
+  int64 version = 14;
+
+  // Output only. When the profile was created.
+  google.protobuf.Timestamp created_at = 15;
+
+  // Output only. When the profile last changed.
+  google.protobuf.Timestamp updated_at = 16;
+}
+
+// Rating is one user's score for the other party of a completed transaction.
+message Rating {
+  // Rating id (UUID).
+  string id = 1;
+
+  // The rated transaction.
+  string transaction_id = 2;
+
+  // Who gave the rating.
+  string rater_id = 3;
+
+  // Who received it.
+  string rated_user_id = 4;
+
+  // Score, 1-5.
+  int32 score = 5;
+
+  // Optional comment.
+  string comment = 6;
+
+  // When the rating was given.
+  google.protobuf.Timestamp created_at = 7;
+}
+
+// ListingCard is the compact listing shown on a profile, projected from the
+// catalog listing stream.
+message ListingCard {
+  // Listing id (UUID); open it with catalog GetListing.
+  string listing_id = 1;
+
+  // Board: sell offer or buy-request.
+  common.v1.ListingKind kind = 2;
+
+  // Product.
+  common.v1.ProductType product = 3;
+
+  // Quantity posted.
+  common.v1.Mass quantity = 4;
+
+  // Quantity not yet committed to transactions.
+  common.v1.Mass remaining_quantity = 5;
+
+  // Price per kg or tonne. Unset = negotiable.
+  common.v1.UnitPrice price = 6;
+
+  // Region of the listing's address.
+  common.v1.Region region = 7;
+
+  // District of the listing's address.
+  string district = 8;
+
+  // Life-cycle status.
+  agrogram.events.v1.ListingStatus status = 9;
+
+  // First photo or video poster.
+  common.v1.MediaRef cover = 10;
+
+  // When the listing was posted.
+  google.protobuf.Timestamp created_at = 11;
+}
+
+// CreateProfileRequest is the input of CreateProfile.
+message CreateProfileRequest {
+  // Idempotency key (UUID).
+  string request_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // The profile. Output-only fields are ignored; the id is the caller's.
+  Profile profile = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).cel = {
+      id: "create_profile.display_name_required"
+      message: "display_name is required"
+      expression: "this.display_name != ''"
+    }
+  ];
+}
+
+// CreateProfileResponse is the output of CreateProfile.
+message CreateProfileResponse {
+  // The new profile.
+  Profile profile = 1;
+}
+
+// GetProfileRequest is the input of GetProfile.
+message GetProfileRequest {
+  // Profile to read (user id).
+  string user_id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+// GetProfileResponse is the output of GetProfile.
+message GetProfileResponse {
+  // The profile.
+  Profile profile = 1;
+}
+
+// UpdateProfileRequest is the input of UpdateProfile.
+message UpdateProfileRequest {
+  option (buf.validate.message).cel = {
+    id: "update_profile.display_name_not_cleared"
+    message: "display_name cannot be cleared"
+    expression: "!('display_name' in this.update_mask.paths) || this.profile.display_name != ''"
+  };
+
+  // The caller's profile, with `id` set and the new values of the fields in
+  // `update_mask`.
+  Profile profile = 1 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).cel = {
+      id: "update_profile.id_required"
+      message: "profile.id is required"
+      expression: "this.id != ''"
+    }
+  ];
+
+  // Fields to change.
+  google.protobuf.FieldMask update_mask = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).field_mask = {
+      in: [
+        "display_name",
+        "avatar",
+        "bio",
+        "region",
+        "district"
+      ]
+    },
+    (buf.validate.field).cel = {
+      id: "update_profile.update_mask_not_empty"
+      message: "update_mask must name at least one field"
+      expression: "size(this.paths) > 0"
+    }
+  ];
+
+  // Version the change is based on; 0 skips the check. A stale version fails
+  // with ABORTED / CONFLICT.
+  int64 expected_version = 3 [(buf.validate.field).int64.gte = 0];
+}
+
+// UpdateProfileResponse is the output of UpdateProfile.
+message UpdateProfileResponse {
+  // The updated profile.
+  Profile profile = 1;
+}
+
+// DeleteProfileRequest is the input of DeleteProfile.
+message DeleteProfileRequest {
+  // Profile to delete. Empty = the caller's; staff may delete any.
+  string user_id = 1 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.uuid = true
+  ];
+}
+
+// DeleteProfileResponse is the output of DeleteProfile.
+message DeleteProfileResponse {}
+
+// FollowUserRequest is the input of FollowUser.
+message FollowUserRequest {
+  // User to follow.
+  string user_id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+// FollowUserResponse is the output of FollowUser.
+message FollowUserResponse {
+  // The followed user's profile, with updated counters.
+  Profile profile = 1;
+}
+
+// UnfollowUserRequest is the input of UnfollowUser.
+message UnfollowUserRequest {
+  // User to unfollow.
+  string user_id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+// UnfollowUserResponse is the output of UnfollowUser.
+message UnfollowUserResponse {
+  // The unfollowed user's profile, with updated counters.
+  Profile profile = 1;
+}
+
+// ListFollowersRequest is the input of ListFollowers.
+message ListFollowersRequest {
+  // Whose followers to list.
+  string user_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Page to read.
+  common.v1.PageRequest page = 2;
+}
+
+// ListFollowersResponse is the output of ListFollowers.
+message ListFollowersResponse {
+  // Followers' profiles.
+  repeated Profile profiles = 1;
+
+  // Next-page cursor.
+  common.v1.PageResponse page = 2;
+}
+
+// ListFollowingRequest is the input of ListFollowing.
+message ListFollowingRequest {
+  // Whose follows to list.
+  string user_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Page to read.
+  common.v1.PageRequest page = 2;
+}
+
+// ListFollowingResponse is the output of ListFollowing.
+message ListFollowingResponse {
+  // Profiles of the users followed.
+  repeated Profile profiles = 1;
+
+  // Next-page cursor.
+  common.v1.PageResponse page = 2;
+}
+
+// RateUserRequest is the input of RateUser. The rated user is the caller's
+// counterparty in the transaction.
+message RateUserRequest {
+  // Idempotency key (UUID).
+  string request_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Completed transaction between the caller and the rated user.
+  string transaction_id = 2 [(buf.validate.field).string.uuid = true];
+
+  // Score, 1-5.
+  int32 score = 3 [(buf.validate.field).int32 = {
+    gte: 1
+    lte: 5
+  }];
+
+  // Optional comment.
+  string comment = 4 [(buf.validate.field).string.max_len = 500];
+}
+
+// RateUserResponse is the output of RateUser.
+message RateUserResponse {
+  // The stored rating.
+  Rating rating = 1;
+}
+
+// ListRatingsRequest is the input of ListRatings.
+message ListRatingsRequest {
+  // User whose received ratings to list.
+  string user_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Page to read.
+  common.v1.PageRequest page = 2;
+}
+
+// ListRatingsResponse is the output of ListRatings.
+message ListRatingsResponse {
+  // Ratings, newest first.
+  repeated Rating ratings = 1;
+
+  // The user's aggregate rating.
+  agrogram.events.v1.RatingSummary summary = 2;
+
+  // Next-page cursor.
+  common.v1.PageResponse page = 3;
+}
+
+// ListUserListingsRequest is the input of ListUserListings.
+message ListUserListingsRequest {
+  // Owner of the listings.
+  string user_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Board to list. Unspecified = both.
+  common.v1.ListingKind kind = 2 [(buf.validate.field).enum.defined_only = true];
+
+  // Statuses to include. Empty = ACTIVE. Other statuses are returned to the
+  // owner only.
+  repeated agrogram.events.v1.ListingStatus statuses = 3 [(buf.validate.field).repeated = {
+    max_items: 5
+    unique: true
+    items: {
+      enum: {
+        defined_only: true
+        not_in: [0]
+      }
+    }
+  }];
+
+  // Page to read.
+  common.v1.PageRequest page = 4;
+}
+
+// ListUserListingsResponse is the output of ListUserListings.
+message ListUserListingsResponse {
+  // Listings, newest first.
+  repeated ListingCard listings = 1;
+
+  // Next-page cursor.
+  common.v1.PageResponse page = 2;
+}

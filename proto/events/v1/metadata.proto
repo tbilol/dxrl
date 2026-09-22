@@ -1,0 +1,180 @@
+syntax = "proto3";
+
+package agrogram.events.v1;
+
+import "buf/validate/validate.proto";
+import "common/v1/auth.proto";
+import "common/v1/error.proto";
+import "common/v1/resource.proto";
+import "google/protobuf/timestamp.proto";
+
+// Kafka event backbone
+// ====================
+//
+// Every topic carries exactly one envelope message, `<Aggregate>Event`, as
+// Protobuf binary. Topics are named `agrogram.<producer>.<aggregate>.v<major>`;
+// this package is the `v1` schema of all of them.
+//
+//   Topic                                 Key              Envelope (file)
+//   agrogram.identity.account.v1          user_id          AccountEvent (account.proto)
+//   agrogram.profilesocial.profile.v1     user_id          ProfileEvent (profile.proto)
+//   agrogram.catalog.listing.v1           listing_id       ListingEvent (listing.proto)
+//   agrogram.orderescrow.transaction.v1   transaction_id   TransactionEvent (transaction.proto)
+//   agrogram.mediapipeline.media.v1       media_id         MediaEvent (media.proto)
+//   agrogram.notification.request.v1      recipient_id     NotificationRequestEvent (notification.proto)
+//   agrogram.<consumer>.deadletter.v1     original key     DeadLetter (this file)
+//
+// Envelope layout:
+//
+//   message <Aggregate>Event {
+//     EventMetadata metadata = 1;            // always set
+//     <Aggregate>Snapshot <aggregate> = 2;   // aggregate state AFTER the event
+//     // 3-9: kept free for future envelope-level fields
+//     oneof event { ... = 10 and up }        // exactly one concrete event
+//   }
+//
+// The snapshot sits in the envelope rather than in each event, so every event
+// of a stream carries the aggregate's full state after it (event-carried state
+// transfer). A consumer that only keeps a projection (listing cards, analytics
+// facts) can upsert from ANY event, including event types added after it was
+// built, and reads the oneof only for step-specific details. The notification
+// request stream has no aggregate state and therefore no snapshot.
+//
+// Record headers:
+//
+//   content-type   application/x-protobuf
+//   event-type     EventMetadata.event_type (lets consumers filter without decoding)
+//   event-id       EventMetadata.event_id
+//   x-request-id   EventMetadata.correlation_id
+//   traceparent    EventMetadata.traceparent (and tracestate when present)
+//
+// Producer rules:
+//
+//   - Write the event to a transactional outbox in the same database
+//     transaction as the state change; a relay publishes it. Delivery is
+//     at-least-once.
+//   - Key every record by the aggregate id so one aggregate's events stay in
+//     order on one partition.
+//   - Never publish contact details (phone, e-mail), credentials or URLs of
+//     private media. Consumers look those up by id.
+//
+// Consumer rules:
+//
+//   - De-duplicate on `event_id`; duplicates and replays are normal.
+//   - Upsert projections from the snapshot only when `aggregate_version` is
+//     newer than the stored one. React to facts (send a notification, bump a
+//     counter) once per `event_id`, whatever the version.
+//   - An unknown `oneof` case comes from a newer producer: apply the snapshot,
+//     skip the details, never fail on it.
+//   - When the retry budget is spent, publish a DeadLetter and move on.
+
+// EventMetadata is the header of every event: identity, causality and
+// tracing. It is field 1 of every envelope.
+message EventMetadata {
+  // Unique event id (UUIDv7). Consumers de-duplicate on it.
+  string event_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Fully qualified name of the concrete event message, e.g.
+  // "agrogram.events.v1.PaymentHeld". Also sent as the `event-type` header.
+  string event_type = 2 [(buf.validate.field).string.pattern = "^agrogram\\.events\\.v[1-9][0-9]*\\.[A-Z][A-Za-z0-9]*$"];
+
+  // When the fact happened: the commit time of the state change, not the
+  // publish time.
+  google.protobuf.Timestamp occurred_at = 3 [(buf.validate.field).required = true];
+
+  // Service that produced the event, e.g. "order-escrow".
+  string producer = 4 [(buf.validate.field).string.pattern = "^[a-z][a-z0-9-]{1,62}$"];
+
+  // Kind of aggregate the stream is about: USER (account, profile,
+  // notification requests), LISTING, TRANSACTION or MEDIA.
+  common.v1.ResourceType aggregate_type = 5 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+
+  // Aggregate id (UUID). Always equal to the Kafka record key.
+  string aggregate_id = 6 [(buf.validate.field).string.uuid = true];
+
+  // Version of the aggregate after this event (the snapshot's `version`).
+  // Events that do not change the snapshot repeat the current version. 0 on
+  // streams without a versioned aggregate (notification requests).
+  int64 aggregate_version = 7 [(buf.validate.field).int64.gte = 0];
+
+  // Correlation id: the `x-request-id` of the request that started the chain
+  // (normally a UUID). Background jobs generate a fresh one.
+  string correlation_id = 8 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 128
+  }];
+
+  // `event_id` of the event that caused this one, e.g. the ListingClosed that
+  // made order-escrow cancel a transaction. Empty when a command caused it.
+  string causation_id = 9 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.uuid = true
+  ];
+
+  // W3C Trace Context `traceparent` of the producing span (OpenTelemetry).
+  string traceparent = 10 [
+    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
+    (buf.validate.field).string.pattern = "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+  ];
+
+  // W3C Trace Context `tracestate`, when present.
+  string tracestate = 11 [(buf.validate.field).string.max_len = 512];
+
+  // Who performed the action: a user, or a service acting on its own (timers,
+  // payment callbacks, consumers reacting to other events).
+  common.v1.Actor actor = 12 [(buf.validate.field).required = true];
+}
+
+// DeadLetter wraps a record that a consumer could not process within its
+// retry budget, so the partition can move on and staff can inspect or replay
+// it.
+//
+// Topic:      agrogram.<consumer-service>.deadletter.v1, one per consuming
+//             service (e.g. agrogram.notification.deadletter.v1). This is
+//             operational data, so it is not wrapped in an event envelope.
+// Key:        the original record key.
+// Producer:   the failing consumer. Consumer: staff tooling / replay jobs.
+// Retention:  delete after 14 days. Partitions: 1.
+message DeadLetter {
+  // Topic the record was read from.
+  string source_topic = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 249
+  }];
+
+  // Partition the record was read from.
+  int32 source_partition = 2 [(buf.validate.field).int32.gte = 0];
+
+  // Offset of the record in that partition.
+  int64 source_offset = 3 [(buf.validate.field).int64.gte = 0];
+
+  // Original record key, unchanged.
+  bytes key = 4;
+
+  // Original record value, undecoded (it may be the reason for the failure).
+  bytes value = 5;
+
+  // Original record headers.
+  map<string, bytes> headers = 6;
+
+  // Consumer group that failed, e.g. "notification".
+  string consumer_group = 7 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 255
+  }];
+
+  // Last processing error.
+  common.v1.Error error = 8 [(buf.validate.field).required = true];
+
+  // Processing attempts made before giving up.
+  int32 attempts = 9 [(buf.validate.field).int32.gte = 1];
+
+  // When the first attempt failed.
+  google.protobuf.Timestamp first_failed_at = 10 [(buf.validate.field).required = true];
+
+  // When the record was dead-lettered.
+  google.protobuf.Timestamp dead_lettered_at = 11 [(buf.validate.field).required = true];
+}

@@ -1,0 +1,139 @@
+syntax = "proto3";
+
+package agrogram.events.v1;
+
+import "buf/validate/validate.proto";
+import "common/v1/error.proto";
+import "common/v1/media.proto";
+import "common/v1/quantity.proto";
+import "common/v1/resource.proto";
+import "events/v1/metadata.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// Media stream
+// ============
+//
+//   Topic      agrogram.mediapipeline.media.v1
+//   Key        media_id
+//   Producer   media-pipeline
+//   Consumers  catalog (listing photos and video), profile-social (avatars),
+//              order-escrow (weighbridge receipt photos)
+//
+// Events: MediaUploaded. Processing results (renditions, OCR) are part of the
+// snapshot; an event for "processing finished" (for example MediaProcessed)
+// is a later, non-breaking `oneof` addition.
+
+// ReceiptOcrResult is what OCR read from a weighbridge ticket photo. Shared by
+// the media-pipeline API and this stream.
+//
+// TODO(weighbridge): OCR is not implemented yet.
+message ReceiptOcrResult {
+  // Ticket number.
+  string ticket_number = 1 [(buf.validate.field).string.max_len = 64];
+
+  // Loaded vehicle weight.
+  common.v1.Mass gross_mass = 2;
+
+  // Empty vehicle weight.
+  common.v1.Mass tare_mass = 3;
+
+  // Goods weight (gross - tare).
+  common.v1.Mass net_mass = 4;
+
+  // Weighing time printed on the ticket.
+  google.protobuf.Timestamp weighed_at = 5;
+
+  // OCR confidence for the whole ticket, 0-100.
+  int32 confidence_percent = 6 [(buf.validate.field).int32 = {
+    gte: 0
+    lte: 100
+  }];
+}
+
+// MediaEvent is the envelope of the media stream, one per Kafka record.
+message MediaEvent {
+  // Event header.
+  EventMetadata metadata = 1 [(buf.validate.field).required = true];
+
+  // The media object after the event.
+  MediaSnapshot media = 2 [(buf.validate.field).required = true];
+
+  // The concrete event. Producers set exactly one case. The oneof is not
+  // `required` on purpose: a consumer on an older schema sees a newer case as
+  // unset and must still accept the record (see metadata.proto).
+  oneof event {
+    // The file arrived and processing was queued.
+    MediaUploaded media_uploaded = 10;
+  }
+}
+
+// MediaSnapshot is the state of an uploaded media object. URLs are published
+// for public purposes only; weighbridge receipts never carry URLs here.
+message MediaSnapshot {
+  // Media id (UUID). Equals the record key.
+  string id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Uploader.
+  string owner_id = 2 [(buf.validate.field).string.uuid = true];
+
+  // What the file is for. Selects the processing jobs.
+  common.v1.MediaPurpose purpose = 3 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+
+  // Image or video.
+  common.v1.MediaType type = 4 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+
+  // Pipeline state.
+  common.v1.MediaStatus status = 5 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+
+  // Resource the file belongs to (listing, user, transaction), when known.
+  common.v1.ResourceRef attached_to = 6;
+
+  // MIME type of the original file, e.g. "image/jpeg".
+  string content_type = 7 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 128
+  }];
+
+  // Size of the original file.
+  int64 size_bytes = 8 [(buf.validate.field).int64.gte = 0];
+
+  // Display rendition (image, or video stream) once READY. Empty for private
+  // purposes.
+  string url = 9;
+
+  // Small image or video poster once READY. Empty for private purposes.
+  string thumbnail_url = 10;
+
+  // Length of a video.
+  google.protobuf.Duration duration = 11;
+
+  // OCR result of a weighbridge receipt photo, once processed.
+  ReceiptOcrResult receipt_ocr = 12;
+
+  // Why processing failed (status FAILED).
+  common.v1.Error error = 13;
+
+  // Aggregate version; equals EventMetadata.aggregate_version.
+  int64 version = 14 [(buf.validate.field).int64.gte = 1];
+
+  // When the upload slot was created.
+  google.protobuf.Timestamp created_at = 15 [(buf.validate.field).required = true];
+
+  // When the media object last changed.
+  google.protobuf.Timestamp updated_at = 16 [(buf.validate.field).required = true];
+}
+
+// MediaUploaded: the file arrived in storage and its processing jobs were
+// queued (status PROCESSING). Consumers attach the media to the resource in
+// `attached_to`.
+message MediaUploaded {}

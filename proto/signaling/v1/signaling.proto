@@ -1,0 +1,225 @@
+syntax = "proto3";
+
+package agrogram.signaling.v1;
+
+import "buf/validate/validate.proto";
+import "common/v1/resource.proto";
+import "google/protobuf/timestamp.proto";
+
+// SignalingService sets up one-to-one WebRTC voice calls between users, for
+// example a reseller calling a farmer about a listing.
+//
+// Contract stub for a later phase: every RPC returns UNIMPLEMENTED until the
+// signaling phase. TODO(signaling): TURN hosting, call records and the chat
+// ownership decision.
+//
+// Flow: the caller calls StartCall; the callee is rung by a push notification
+// (category CALL). Both open ExchangeSignals, send JoinCall first, receive
+// CallJoined with ICE servers, then relay SDP offer/answer and ICE candidates
+// through the stream. Either side ends the call with EndCall. Browsers reach
+// the stream through the api-gateway's WebSocket bridge.
+service SignalingService {
+  // Creates a call to another user and rings them.
+  // Errors: SELF_ACTION_NOT_ALLOWED.
+  rpc StartCall(StartCallRequest) returns (StartCallResponse);
+
+  // Bidirectional signaling stream for one call. The first client message
+  // must be `join`.
+  rpc ExchangeSignals(stream ExchangeSignalsRequest) returns (stream ExchangeSignalsResponse);
+
+  // Ends, declines or cancels a call.
+  rpc EndCall(EndCallRequest) returns (EndCallResponse);
+}
+
+// CallState is where a call stands.
+enum CallState {
+  CALL_STATE_UNSPECIFIED = 0;
+  // The callee is being rung.
+  CALL_STATE_RINGING = 1;
+  // Both parties joined.
+  CALL_STATE_ACTIVE = 2;
+  // Over; see `end_reason`.
+  CALL_STATE_ENDED = 3;
+}
+
+// CallEndReason is why a call ended.
+enum CallEndReason {
+  CALL_END_REASON_UNSPECIFIED = 0;
+  // A party hung up (or the caller cancelled before an answer).
+  CALL_END_REASON_HANGUP = 1;
+  // The callee declined.
+  CALL_END_REASON_DECLINED = 2;
+  // Nobody answered in time.
+  CALL_END_REASON_MISSED = 3;
+  // The connection could not be set up or was lost.
+  CALL_END_REASON_FAILED = 4;
+}
+
+// SdpType is the role of a session description in the offer/answer exchange.
+enum SdpType {
+  SDP_TYPE_UNSPECIFIED = 0;
+  // Offer, from the caller.
+  SDP_TYPE_OFFER = 1;
+  // Answer, from the callee.
+  SDP_TYPE_ANSWER = 2;
+}
+
+// Call is a one-to-one call.
+message Call {
+  // Call id (UUID).
+  string id = 1;
+
+  // Who started it.
+  string caller_id = 2;
+
+  // Who is called.
+  string callee_id = 3;
+
+  // Current state.
+  CallState state = 4;
+
+  // What the call is about (a listing or a transaction), if anything.
+  common.v1.ResourceRef context = 5;
+
+  // Why it ended (state ENDED).
+  CallEndReason end_reason = 6;
+
+  // When the call was started.
+  google.protobuf.Timestamp created_at = 7;
+
+  // When the callee joined.
+  google.protobuf.Timestamp answered_at = 8;
+
+  // When it ended.
+  google.protobuf.Timestamp ended_at = 9;
+}
+
+// IceServer is a STUN or TURN server for WebRTC (RTCIceServer).
+message IceServer {
+  // Server URLs, e.g. "turn:turn.agrogram.uz:3478?transport=udp".
+  repeated string urls = 1;
+
+  // TURN username (short-lived).
+  string username = 2;
+
+  // TURN credential (short-lived).
+  string credential = 3 [debug_redact = true];
+}
+
+// SessionDescription is a WebRTC SDP offer or answer (RTCSessionDescription).
+message SessionDescription {
+  // Offer or answer.
+  SdpType type = 1 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+
+  // SDP text.
+  string sdp = 2 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 65536
+  }];
+}
+
+// IceCandidate is a WebRTC ICE candidate (RTCIceCandidateInit).
+message IceCandidate {
+  // Candidate line, e.g. "candidate:1 1 udp 2122260223 ...".
+  string candidate = 1 [(buf.validate.field).string.max_len = 4096];
+
+  // Media stream identification tag.
+  string sdp_mid = 2 [(buf.validate.field).string.max_len = 64];
+
+  // Index of the media description.
+  int32 sdp_mline_index = 3 [(buf.validate.field).int32.gte = 0];
+
+  // ICE username fragment.
+  string username_fragment = 4 [(buf.validate.field).string.max_len = 256];
+}
+
+// JoinCall attaches the stream to a call. First client message on every
+// stream.
+message JoinCall {}
+
+// CallJoined confirms the stream is attached. First server message on every
+// stream.
+message CallJoined {
+  // The call.
+  Call call = 1;
+
+  // STUN and TURN servers to use.
+  repeated IceServer ice_servers = 2;
+}
+
+// StartCallRequest is the input of StartCall.
+message StartCallRequest {
+  // Idempotency key (UUID).
+  string request_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // User to call.
+  string callee_id = 2 [(buf.validate.field).string.uuid = true];
+
+  // What the call is about, shown to the callee.
+  common.v1.ResourceRef context = 3;
+}
+
+// StartCallResponse is the output of StartCall.
+message StartCallResponse {
+  // The call (RINGING).
+  Call call = 1;
+}
+
+// ExchangeSignalsRequest is one client message on the signaling stream.
+message ExchangeSignalsRequest {
+  // Call the message belongs to.
+  string call_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // The message.
+  oneof signal {
+    option (buf.validate.oneof).required = true;
+
+    // Attach to the call. Must come first.
+    JoinCall join = 2;
+
+    // SDP offer (caller) or answer (callee), relayed to the other party.
+    SessionDescription description = 3;
+
+    // ICE candidate, relayed to the other party.
+    IceCandidate ice_candidate = 4;
+  }
+}
+
+// ExchangeSignalsResponse is one server message on the signaling stream.
+message ExchangeSignalsResponse {
+  // Call the message belongs to.
+  string call_id = 1;
+
+  // The message.
+  oneof signal {
+    // The stream is attached. First message.
+    CallJoined joined = 2;
+
+    // The other party's SDP offer or answer.
+    SessionDescription description = 3;
+
+    // The other party's ICE candidate.
+    IceCandidate ice_candidate = 4;
+
+    // The call changed state (answered, ended).
+    Call call_updated = 5;
+  }
+}
+
+// EndCallRequest is the input of EndCall.
+message EndCallRequest {
+  // Call to end.
+  string call_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Why. Unspecified = HANGUP; the callee sends DECLINED to reject.
+  CallEndReason reason = 2 [(buf.validate.field).enum.defined_only = true];
+}
+
+// EndCallResponse is the output of EndCall.
+message EndCallResponse {
+  // The call (ENDED).
+  Call call = 1;
+}

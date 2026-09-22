@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package agrogram.common.v1;
+
+import "buf/validate/validate.proto";
+import "common/v1/quantity.proto";
+
+// Money is an exact amount of money in a currency's minor units.
+//
+// Trade on AGROGRAM settles in Uzbek so'm (UZS). ISO 4217 gives UZS two minor
+// digits (1 so'm = 100 tiyin), so `amount_minor = 150000` is 1 500.00 so'm.
+// Uzbek payment providers (Payme, Click) also exchange amounts in tiyin.
+//
+// Never use floating point for money: add and multiply `amount_minor` as int64
+// and round half-up only at the final step.
+message Money {
+  // Amount in minor units (tiyin for UZS). Negative values are allowed only
+  // where the containing field documents it (refunds, adjustments).
+  int64 amount_minor = 1;
+
+  // ISO 4217 alphabetic code, upper case. "UZS" for all trade; subscription
+  // prices may be quoted in "USD".
+  string currency_code = 2 [(buf.validate.field).string.pattern = "^[A-Z]{3}$"];
+}
+
+// UnitPrice is the price of exactly one unit of mass, e.g. 6 000 so'm per kg.
+//
+// Listings quote so'm per kilogram; some analytics views show so'm per tonne.
+// Always compute totals through grams:
+//
+//   total_minor = round_half_up(amount.amount_minor * mass.grams / grams_in(unit))
+//
+// where grams_in(KILOGRAM) = 1 000 and grams_in(TONNE) = 1 000 000.
+message UnitPrice {
+  // Price for one `unit`. Must not be negative.
+  Money amount = 1 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).cel = {
+      id: "unit_price.amount.non_negative"
+      message: "price must not be negative"
+      expression: "this.amount_minor >= 0"
+    }
+  ];
+
+  // The mass unit the price is quoted per.
+  MassUnit unit = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+}

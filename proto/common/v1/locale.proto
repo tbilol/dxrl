@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package agrogram.common.v1;
+
+// Language is a user-interface language supported by the apps.
+enum Language {
+  LANGUAGE_UNSPECIFIED = 0;
+  // O'zbekcha (Latin script). Default.
+  LANGUAGE_UZ = 1;
+  // Русский.
+  LANGUAGE_RU = 2;
+}
+
+// LocalizedText is a short text in every supported UI language, used for
+// reference data (product names, notification templates) served by the backend.
+message LocalizedText {
+  // O'zbekcha (Latin script).
+  string uz = 1;
+
+  // Русский.
+  string ru = 2;
+}

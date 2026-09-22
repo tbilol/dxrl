@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package agrogram.common.v1;
+
+import "buf/validate/validate.proto";
+
+// PageRequest asks for one page of a list using opaque cursor tokens.
+//
+// Start with an empty `page_token`; pass `PageResponse.next_page_token` to get
+// the next page. Tokens are opaque, service-specific and only valid for the
+// same filter/sort as the call that produced them.
+message PageRequest {
+  // Maximum items to return. 0 = service default (20). Maximum 100.
+  int32 page_size = 1 [(buf.validate.field).int32 = {
+    gte: 0
+    lte: 100
+  }];
+
+  // Cursor from a previous response; empty for the first page.
+  string page_token = 2 [(buf.validate.field).string.max_len = 1024];
+}
+
+// PageResponse carries the cursor for the next page.
+message PageResponse {
+  // Empty when there are no more items.
+  string next_page_token = 1;
+
+  // Total matching items, when cheap to compute. May be an estimate for large
+  // result sets; unset when unknown.
+  optional int64 total_size = 2;
+}
+
+// SortDirection is the order of a sort key.
+enum SortDirection {
+  SORT_DIRECTION_UNSPECIFIED = 0;
+  // Ascending (smallest / oldest first).
+  SORT_DIRECTION_ASC = 1;
+  // Descending (largest / newest first).
+  SORT_DIRECTION_DESC = 2;
+}
