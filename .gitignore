@@ -7,3 +7,7 @@ __pycache__/
 # Contract tooling (generated code is reproducible via `make proto-gen`)
 gen/
 .buf-cache/
+
+# Secrets
+.env
+.env.*
