@@ -80,7 +80,8 @@ back/
 │   ├── <service>/v1/          # one .proto per service: its gRPC service + messages
 │   └── events/v1/             # Kafka event envelopes and payloads
 ├── services/<service>/        # scaffold per service: README.md + placeholder Dockerfile
-├── deploy/docker-compose.yml  # placeholder, filled in during the infra step
+├── deploy/                    # local infra: Postgres, Redis, Kafka, Kafka UI, Adminer
+│                              #   (docker-compose.yml, init scripts); see deploy/README.md
 ├── buf.yaml                   # buf module, lint and breaking rules, deps (protovalidate)
 ├── buf.lock                   # pinned dependency versions
 ├── buf.gen.yaml               # codegen: Go, Python, Java via BSR remote plugins
@@ -325,7 +326,7 @@ today.
 | Phase | Scope | Why this order |
 | --- | --- | --- |
 | **0**: contracts (this) | Protos, codegen, scaffolds | Every team builds against the same contracts |
-| **1**: platform | Fill `deploy/docker-compose.yml` (Kafka, Postgres, Redis, MinIO). Per-language service chassis: gRPC server, protovalidate interceptor, `Principal` from metadata, `Error` mapping, OpenTelemetry, health, outbox producer, de-duplicating consumer. CI running `make proto` + breaking check. Edge config: JWT, header injection, gRPC↔JSON with `google.api.http` annotations | Removes cross-cutting work from every later phase |
+| **1**: platform | Fill `deploy/docker-compose.yml` (Kafka, Postgres, Redis, MinIO); Kafka, Postgres and Redis are in place, see [deploy/README.md](deploy/README.md). Per-language service chassis: gRPC server, protovalidate interceptor, `Principal` from metadata, `Error` mapping, OpenTelemetry, health, outbox producer, de-duplicating consumer. CI running `make proto` + breaking check. Edge config: JWT, header injection, gRPC↔JSON with `google.api.http` annotations | Removes cross-cutting work from every later phase |
 | **2**: identity + auth-gateway | Accounts, roles, sign-in, tokens, e-ijara verification (integration may start as a stub) | Every other service needs user ids, roles and the premium flag |
 | **3**: catalog + media-pipeline (images) + profile-social | Both boards, product reference, listing photos, profiles, follows | Transactions start from listings; profiles decorate listing cards |
 | **4**: order-escrow + notification | Escrow state machine end to end, with payments stubbed (`TODO(payments)`), weighbridge receipt + OCR, step notifications, ratings unlocked | Needs listings, accounts and media; it is the core business flow |

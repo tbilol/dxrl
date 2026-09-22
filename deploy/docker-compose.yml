@@ -1,11 +1,27 @@
-# AGROGRAM local stack: PLACEHOLDER (Phase 0).
+# AGROGRAM local infrastructure (Phase 1, infra step).
 #
-# This file is filled in during the infrastructure step. It is intentionally
-# empty now, because no service has an implementation yet. Planned contents:
+# Backing services for local development. No AGROGRAM service runs here yet.
 #
-#   infra     kafka (KRaft, single node) + a protobuf-aware schema registry
-#             postgres (one database per service, never shared)
-#             redis (sessions, rate limits, presence)
+#   postgres     PostgreSQL 16: one database and one login role per service,
+#                never shared (postgres/init/)
+#   redis        Redis 7: password-protected, AOF persistence
+#   kafka        Apache Kafka: a single KRaft node (broker + controller), no
+#                ZooKeeper; topics are never auto-created
+#   kafka-init   one-shot: creates the topics (kafka/create-topics.sh), exits 0
+#   kafka-ui     Kafka web UI (kafbat, the maintained fork of provectuslabs/kafka-ui)
+#   adminer      lightweight PostgreSQL web UI
+#
+# Settings come from deploy/.env: create it once with
+# `cp deploy/.env.example deploy/.env`, then change the passwords. Passwords
+# have no defaults; Compose refuses to run until they are set. Every published
+# port binds to BIND_ADDRESS (127.0.0.1 by default), so nothing is reachable
+# from the LAN. From back/: `make infra-up` / `make infra-down`; from the
+# directory that contains back/: `docker compose -f back/deploy/docker-compose.yml
+# up -d`. Details: README.md in this directory.
+#
+# Planned, not built yet:
+#
+#   infra     protobuf-aware schema registry
 #             minio (S3-compatible object storage for media-pipeline)
 #             clickhouse, pending the analytics redesign
 #             coturn (TURN server for signaling, later phase)
@@ -16,11 +32,208 @@
 #   services  auth-gateway, identity, profile-social, catalog, agri-calculator,
 #             order-escrow, notification, analytics, media-pipeline, signaling;
 #             each built from services/<name>/Dockerfile with context `..`
-#             (back/), gRPC on :50051 and health/metrics on :8081 in-container
+#             (back/), gRPC on :50051 and health/metrics on :8081 in-container,
+#             attached to the `agrogram` network
 #
 # Code generation does not use this file: `make proto-gen` runs buf in its own
 # throwaway container (see ../README.md).
 
 name: agrogram
 
-services: {}
+# Defaults shared by every service (kafka-init overrides `restart`).
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  networks: [agrogram]
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  postgres:
+    <<: *service-defaults
+    image: postgres:16.15-alpine3.24
+    environment:
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}
+      POSTGRES_DB: postgres
+      # Read by postgres/init/01-create-service-databases.sh: automatically when
+      # the postgres-data volume is empty, or when re-run by hand.
+      AUTH_GATEWAY_DB_PASSWORD: ${AUTH_GATEWAY_DB_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}
+      IDENTITY_DB_PASSWORD: ${IDENTITY_DB_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}
+      PROFILE_SOCIAL_DB_PASSWORD: ${PROFILE_SOCIAL_DB_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}
+      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}
+      ORDER_ESCROW_DB_PASSWORD: ${ORDER_ESCROW_DB_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-15432}:5432"
+    healthcheck:
+      # Over TCP on purpose: while the init scripts run, the server listens on
+      # its Unix socket only, so this passes only after initialization.
+      test: ["CMD-SHELL", 'pg_isready --quiet --host=127.0.0.1 --port=5432 --username="$$POSTGRES_USER" --dbname=postgres']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+      start_interval: 2s
+
+  redis:
+    <<: *service-defaults
+    image: redis:7.4.11-alpine3.21
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}
+      # redis-cli authenticates with REDISCLI_AUTH, so the healthcheck and
+      # `docker compose exec redis redis-cli` need no -a flag.
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}
+    # A shell expands the password inside the container ($$ stops Compose
+    # from interpolating it). Re-entering docker-entrypoint.sh keeps the
+    # image's switch from root to the redis user.
+    command:
+      - sh
+      - -c
+      - 'exec docker-entrypoint.sh redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes'
+    volumes:
+      - redis-data:/data
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${REDIS_PORT:-16379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+      start_interval: 2s
+
+  kafka:
+    <<: *service-defaults
+    image: apache/kafka:4.3.1
+    # Room for a clean shutdown (the default is 10s).
+    stop_grace_period: 30s
+    environment:
+      # Formats the empty kafka-data volume on first start. Changing it later
+      # requires a fresh volume (README.md, "Resetting data").
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-95a-pdkNTwuNpLUXnbiQHA}
+      # The image turns KAFKA_* variables into server.properties and drops its
+      # built-in defaults as soon as one is set, so every setting is listed.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # INTERNAL: containers on the agrogram network use kafka:9092.
+      # EXTERNAL: host clients use localhost:KAFKA_PORT, published to 9094.
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://${KAFKA_EXTERNAL_HOST:-localhost}:${KAFKA_PORT:-19092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # Only kafka-init creates topics; a client can never create one by
+      # producing to or subscribing to an unknown name.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # One broker, so internal topics get one replica.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
+    volumes:
+      # The image runs as the non-root appuser. This path exists in the image
+      # and belongs to appuser, so a new named volume inherits that owner.
+      - kafka-data:/var/lib/kafka/data
+    # The image declares these paths as volumes too. Empty tmpfs mounts stop
+    # Docker from creating anonymous volumes for them, which
+    # `docker compose down` would leave behind. No SSL, no extra config files.
+    tmpfs:
+      - /etc/kafka/secrets
+      - /mnt/shared/config
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${KAFKA_PORT:-19092}:9094"
+    healthcheck:
+      # Each check starts a small JVM, hence the separate heap cap and the
+      # longer interval once the broker is up.
+      test: ["CMD-SHELL", "KAFKA_HEAP_OPTS=-Xmx128m /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 90s
+      start_interval: 5s
+
+  kafka-init:
+    <<: *service-defaults
+    # One-shot: creates the topics, prints them and exits 0.
+    restart: "no"
+    image: apache/kafka:4.3.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["bash", "/opt/agrogram/create-topics.sh"]
+    environment:
+      BOOTSTRAP_SERVER: kafka:9092
+      STREAM_PARTITIONS: ${KAFKA_STREAM_PARTITIONS:-3}
+    volumes:
+      - ./kafka/create-topics.sh:/opt/agrogram/create-topics.sh:ro
+    # Same reason as on kafka: no anonymous volumes. This container keeps no data.
+    tmpfs:
+      - /etc/kafka/secrets
+      - /mnt/shared/config
+      - /var/lib/kafka/data
+
+  kafka-ui:
+    <<: *service-defaults
+    image: ghcr.io/kafbat/kafka-ui:v1.5.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+      # The UI starts with the topics in place. It also makes
+      # `docker compose up --wait` wait for kafka-init to exit 0: Compose
+      # only waits for a one-shot's exit when a service depends on it this way.
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_CLUSTERS_0_NAME: agrogram-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      # The image logs a DEBUG line per metrics poll (every 30s) otherwise.
+      LOGGING_LEVEL_IO_KAFBAT_UI: INFO
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${KAFKA_UI_PORT:-18080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/actuator/health | grep -q UP"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+      start_interval: 3s
+
+  adminer:
+    <<: *service-defaults
+    image: adminer:5.5.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Prefills "Server" on the login form. "System" still defaults to MySQL:
+      # pick PostgreSQL (README.md has direct login links).
+      ADMINER_DEFAULT_SERVER: postgres
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${ADMINER_PORT:-18081}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+      start_interval: 2s
+
+volumes:
+  postgres-data:
+  redis-data:
+  kafka-data:
+
+networks:
+  agrogram:
+    # Fixed name, so service stacks added later can join it as `external`.
+    name: agrogram

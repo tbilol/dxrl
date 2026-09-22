@@ -11,3 +11,5 @@ gen/
 # Secrets
 .env
 .env.*
+# ...except the committed template with placeholder values (deploy/.env.example)
+!.env.example

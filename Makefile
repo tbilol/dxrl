@@ -1,8 +1,10 @@
-# AGROGRAM backend: contract tooling.
+# AGROGRAM backend: contract tooling and local infrastructure.
 #
-# Every target runs buf from the official bufbuild/buf Docker image, so the only
-# host requirement is Docker (plus network access to buf.build for deps and
+# proto-* targets run buf from the official bufbuild/buf Docker image, so the
+# only host requirement is Docker (plus network access to buf.build for deps and
 # remote plugins). No local protoc, buf or protoc-gen-* plugins.
+# infra-* targets run the local stack in deploy/ with Docker Compose (see
+# deploy/README.md).
 
 BUF_VERSION ?= 1.73.0
 BUF_IMAGE   ?= bufbuild/buf:$(BUF_VERSION)
@@ -23,10 +25,18 @@ BUF := $(DOCKER) run --rm \
 	--env BUF_TOKEN \
 	$(BUF_IMAGE)
 
+# Local infrastructure. Settings and secrets come from INFRA_ENV_FILE; create
+# it once with `cp deploy/.env.example deploy/.env`. SERVICE limits infra-logs
+# to one service, e.g. `make infra-logs SERVICE=kafka`.
+INFRA_ENV_FILE ?= deploy/.env
+SERVICE        ?=
+INFRA_COMPOSE  := $(DOCKER) compose --file deploy/docker-compose.yml --env-file "$(INFRA_ENV_FILE)"
+
 .DEFAULT_GOAL := help
 
 .PHONY: help proto proto-deps proto-build proto-lint proto-format proto-format-check \
-	proto-breaking proto-gen proto-clean
+	proto-breaking proto-gen proto-clean \
+	infra-env-check infra-up infra-down infra-ps infra-logs
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-20s %s\n", $$1, $$2}'
@@ -56,3 +66,23 @@ proto-gen: ## Generate Go, Python and Java code into gen/
 
 proto-clean: ## Remove generated code
 	rm -rf gen
+
+# Fails fast with a hint, instead of Compose's "required variable" errors.
+infra-env-check:
+	@test -f "$(INFRA_ENV_FILE)" || { \
+		echo "$(INFRA_ENV_FILE) not found. Create it from the template, then change the passwords:" >&2; \
+		echo "  cp deploy/.env.example deploy/.env" >&2; \
+		exit 1; }
+
+infra-up: infra-env-check ## Start Postgres, Redis, Kafka and the UIs; wait until healthy
+	$(INFRA_COMPOSE) up --detach --wait --wait-timeout 300 || { $(INFRA_COMPOSE) ps --all; exit 1; }
+	$(INFRA_COMPOSE) ps --all
+
+infra-down: infra-env-check ## Stop and remove the infra containers (data volumes are kept)
+	$(INFRA_COMPOSE) down --remove-orphans
+
+infra-ps: infra-env-check ## Show infra containers and health (kafka-init: Exited (0))
+	$(INFRA_COMPOSE) ps --all
+
+infra-logs: infra-env-check ## Follow infra logs; one service only: SERVICE=kafka
+	$(INFRA_COMPOSE) logs --follow --tail 200 $(SERVICE)
