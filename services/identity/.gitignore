@@ -1,0 +1,8 @@
+# Build and test outputs
+/bin/
+*.test
+*.out
+coverage.*
+
+# Local settings (back/.gitignore ignores .env too; .env.example is committed)
+.env
