@@ -77,6 +77,8 @@ func (s *Service) RetryPending(ctx context.Context) (int, error) {
 // ExpireVerifications marks VERIFIED verifications whose lease ended before
 // today (Asia/Tashkent) EXPIRED, revokes ROLE_FARMER unless another VERIFIED
 // verification remains, and requests a notification, one transaction each.
+// Each transaction also writes FarmerVerificationExpired and, when the role
+// was revoked, AccountRoleChanged to the outbox.
 func (s *Service) ExpireVerifications(ctx context.Context) (int, error) {
 	today := domain.TashkentDate(s.clock())
 	var due []domain.Verification
@@ -104,14 +106,26 @@ func (s *Service) ExpireVerifications(ctx context.Context) (int, error) {
 			if err != nil || !ok {
 				return err
 			}
-			// TODO(events): publish AccountEvent (farmer verification expired)
-			// on agrogram.identity.account.v1 once events/v1/account.proto exists.
+			// Expiry itself leaves the account row (and its version) as it is.
+			acct, err := q.GetAccount(ctx, v.UserID)
+			if err != nil {
+				return err
+			}
+			expiredEvent, err := events.VerificationEvent(v)
+			if err != nil {
+				return err
+			}
+			if err := s.enqueueAccountEvent(ctx, q, acct, expiredEvent, now, tr); err != nil {
+				return err
+			}
 			if revoked, err = q.RevokeFarmerRoleUnlessVerified(ctx, v.UserID, now); err != nil {
 				return err
 			}
-			// TODO(events): when revoked, publish AccountEvent (roles changed,
-			// ROLE_FARMER revoked) on agrogram.identity.account.v1 once
-			// events/v1/account.proto exists.
+			if revoked {
+				if err := s.enqueueRoleChange(ctx, q, acct, v.ID, now, tr); err != nil {
+					return err
+				}
+			}
 			done = true
 			return s.enqueueNotification(ctx, q, v, events.TemplateFarmerVerificationExpired,
 				map[string]string{"lease_contract_number": v.ContractNumber}, now, tr)

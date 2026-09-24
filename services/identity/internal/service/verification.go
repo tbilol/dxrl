@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	commonv1 "github.com/tbilol/dxrl/gen/go/common/v1"
 	eventsv1 "github.com/tbilol/dxrl/gen/go/events/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/tbilol/dxrl/services/identity/internal/apperr"
 	"github.com/tbilol/dxrl/services/identity/internal/auth"
@@ -128,12 +129,7 @@ func (s *Service) SubmitFarmerVerification(ctx context.Context, p auth.Principal
 			"verification_id", v.ID, "error", err)
 		return v, nil
 	}
-	return s.decide(ctx, v, res, trigger{
-		actor:         p.Actor(),
-		correlationID: p.RequestID,
-		traceparent:   p.Traceparent,
-		tracestate:    p.Tracestate,
-	})
+	return s.decide(ctx, v, res, requestTrigger(p))
 }
 
 // GetFarmerVerification returns a user's latest verification. Empty userID
@@ -206,7 +202,7 @@ func (s *Service) check(ctx context.Context, contract string) (eijara.Result, er
 	return res, nil
 }
 
-// trigger is who caused a decision, for the event metadata.
+// trigger is who caused a change, for the event metadata.
 type trigger struct {
 	actor         *commonv1.Actor
 	correlationID string
@@ -214,13 +210,28 @@ type trigger struct {
 	tracestate    string
 }
 
+// requestTrigger is the caller of an RPC (see auth.Principal.Actor) with the
+// request's correlation id and trace context.
+func requestTrigger(p auth.Principal) trigger {
+	tr := trigger{actor: p.Actor(), correlationID: p.RequestID, traceparent: p.Traceparent, tracestate: p.Tracestate}
+	if tr.correlationID == "" { // only direct callers skip the interceptor's fallback
+		tr.correlationID = newCorrelationID()
+	}
+	return tr
+}
+
 // workerTrigger is identity acting on its own, with a fresh correlation id.
 func workerTrigger() trigger {
+	return trigger{actor: auth.ServiceActor(), correlationID: newCorrelationID()}
+}
+
+// newCorrelationID is a fresh correlation id for work no request started.
+func newCorrelationID() string {
 	id, err := newID()
 	if err != nil {
 		id = uuid.New()
 	}
-	return trigger{actor: auth.ServiceActor(), correlationID: id.String()}
+	return id.String()
 }
 
 // decide applies e-ijara's answer to a PENDING verification and returns the
@@ -268,8 +279,9 @@ func (s *Service) decide(ctx context.Context, v domain.Verification, res eijara.
 	return v.Apply(d), nil
 }
 
-// applyDecision runs inside one transaction: verification status, ROLE_FARMER
-// and the notification request.
+// applyDecision runs inside one transaction: verification status, ROLE_FARMER,
+// the account events (FarmerVerified or FarmerVerificationRejected, then
+// AccountRoleChanged when the role was granted) and the notification request.
 func (s *Service) applyDecision(ctx context.Context, q Queries, v domain.Verification, d domain.Decision, tr trigger) error {
 	if err := q.LockAccount(ctx, v.UserID); err != nil {
 		return err
@@ -281,8 +293,18 @@ func (s *Service) applyDecision(ctx context.Context, q Queries, v domain.Verific
 	if !ok {
 		return errNotPending
 	}
-	// TODO(events): publish AccountEvent (farmer verification decided) on
-	// agrogram.identity.account.v1 once events/v1/account.proto exists.
+	// The decision itself leaves the account row (and its version) as it is.
+	acct, err := q.GetAccount(ctx, v.UserID)
+	if err != nil {
+		return err
+	}
+	decided, err := events.VerificationEvent(v.Apply(d))
+	if err != nil {
+		return err
+	}
+	if err := s.enqueueAccountEvent(ctx, q, acct, decided, d.DecidedAt, tr); err != nil {
+		return err
+	}
 	template := events.TemplateFarmerVerificationRejected
 	params := map[string]string{"lease_contract_number": v.ContractNumber}
 	if d.Status == domain.VerificationVerified {
@@ -292,14 +314,52 @@ func (s *Service) applyDecision(ctx context.Context, q Queries, v domain.Verific
 			return err
 		}
 		if granted {
-			// TODO(events): publish AccountEvent (roles changed, ROLE_FARMER
-			// granted) on agrogram.identity.account.v1 once events/v1/account.proto exists.
 			s.log.InfoContext(ctx, "granting ROLE_FARMER", "user_id", v.UserID, "verification_id", v.ID)
+			if err := s.enqueueRoleChange(ctx, q, acct, v.ID, d.DecidedAt, tr); err != nil {
+				return err
+			}
 		}
 	} else {
 		params["rejection_reason"] = d.RejectionReason.String()
 	}
 	return s.enqueueNotification(ctx, q, v, template, params, d.DecidedAt, tr)
+}
+
+// enqueueAccountEvent writes one AccountEvent to the outbox through q, so it
+// commits or rolls back with the state change. acct is the account right
+// after the event (the snapshot).
+func (s *Service) enqueueAccountEvent(ctx context.Context, q Queries, acct domain.Account, event proto.Message,
+	at time.Time, tr trigger,
+) error {
+	msg, err := events.NewAccountEvent(events.AccountChange{
+		Account:       acct,
+		Event:         event,
+		OccurredAt:    at,
+		CorrelationID: tr.correlationID,
+		Traceparent:   tr.traceparent,
+		Tracestate:    tr.tracestate,
+		Actor:         tr.actor,
+	})
+	if err != nil {
+		return err
+	}
+	return q.EnqueueOutbox(ctx, msg)
+}
+
+// enqueueRoleChange re-reads the account after a role grant or revoke and
+// writes AccountRoleChanged (before -> now) if the role set really changed.
+func (s *Service) enqueueRoleChange(ctx context.Context, q Queries, before domain.Account, verificationID uuid.UUID,
+	at time.Time, tr trigger,
+) error {
+	after, err := q.GetAccount(ctx, before.ID)
+	if err != nil {
+		return err
+	}
+	change := events.RoleChange(before.Roles, after.Roles, verificationID)
+	if change == nil {
+		return nil
+	}
+	return s.enqueueAccountEvent(ctx, q, after, change, at, tr)
 }
 
 func (s *Service) enqueueNotification(ctx context.Context, q Queries, v domain.Verification, template string,

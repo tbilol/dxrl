@@ -11,6 +11,7 @@ validation, events) are in [back/README.md](../../README.md).
 | `GetAccount` | the user (empty `user_id`); `ROLE_ADMIN` or any internal caller for others | Roles, status, plan, `is_premium`, `premium_until`, `is_verified_farmer`, `farmer_verification_status`, version |
 | `SubmitFarmerVerification` | a signed-in user with an ACTIVE account | e-ijara verification (stubbed); grants `ROLE_FARMER` when VERIFIED |
 | `GetFarmerVerification` | same rules as `GetAccount` | The latest verification, or NOT_FOUND |
+| `SetAccountPremium` | internal, `x-agrogram-caller: order-escrow` only | Premium on (plan PREMIUM, no end date) or off (plan DEFAULT); version + 1 and `AccountPremiumChanged`. Asking for the value the account already has is a no-op (no version bump, no event). NOT_FOUND for an unknown account |
 
 Every error is a gRPC status with exactly one `agrogram.common.v1.Error`
 (domain `identity`) in its details; codes follow the `ErrorReason` table.
@@ -32,8 +33,10 @@ Request validation is the protovalidate annotations of the proto
    `LEASE_CONTRACT_ALREADY_CLAIMED`; nothing is stored.
 7. Stored as PENDING, then e-ijara is asked inline with
    `IDENTITY_EIJARA_TIMEOUT`. The answer is applied in one transaction:
-   status, `ROLE_FARMER` + account version bump (VERIFIED), and a
-   notification request in the outbox. REJECTED is a normal response
+   status, `ROLE_FARMER` + account version bump (VERIFIED), and in the
+   outbox `FarmerVerified` / `FarmerVerificationRejected` (+
+   `AccountRoleChanged` when the role was granted) and a notification
+   request. REJECTED is a normal response
    (`status: REJECTED`, `rejection_reason`), not an RPC error. If a partial
    unique index (one VERIFIED verification per contract) trips at this point,
    the verification is stored REJECTED / `LEASE_CONTRACT_ALREADY_CLAIMED`.
@@ -42,7 +45,9 @@ Request validation is the protovalidate annotations of the proto
    last error recorded). Clients poll `GetFarmerVerification`.
 9. The same worker expires VERIFIED verifications whose `valid_until` is
    before today (Asia/Tashkent), revokes `ROLE_FARMER` unless another
-   VERIFIED verification remains, and requests a notification.
+   VERIFIED verification remains, and requests a notification; the same
+   transaction writes `FarmerVerificationExpired` (+ `AccountRoleChanged`
+   when the role was revoked).
 
 ## Events
 
@@ -54,20 +59,61 @@ wait in the outbox. Published rows are purged after `IDENTITY_OUTBOX_RETENTION`.
 
 | Topic | Key | Envelope | When |
 | --- | --- | --- | --- |
+| `agrogram.identity.account.v1` | user id | `AccountEvent{metadata, account, event}` ([`events/v1/account.proto`](../../proto/events/v1/account.proto)) | see the table below |
 | `agrogram.notification.request.v1` | recipient user id | `NotificationRequestEvent{metadata, notification_requested}` | verification VERIFIED (`account.farmer_verified`), REJECTED (`account.farmer_verification_rejected`), EXPIRED (`account.farmer_verification_expired`) |
 
-Category ACCOUNT, params `lease_contract_number` (+ `rejection_reason`),
-subject `{RESOURCE_TYPE_FARMER_VERIFICATION, id}`, channels empty. Metadata:
-UUIDv7 `event_id`, `event_type` `agrogram.events.v1.NotificationRequested`,
-producer `identity`, aggregate USER / recipient / version 0, correlation id =
-`x-request-id` (fresh UUID for worker jobs), `traceparent` when present, actor
-= the user or `{service: "identity"}`. The envelope is validated with
+### Account stream
+
+Every account change writes its `AccountEvent` to the outbox in the same
+transaction, so the change and its event commit or roll back together:
+
+| Event (`oneof` case) | Published by | When | `account.version` |
+| --- | --- | --- | --- |
+| `AccountCreated` | `CreateAccount` | a new account (not on an idempotent retry) | 1 |
+| `FarmerVerified` | `SubmitFarmerVerification` or the worker's retry (`applyDecision`) | e-ijara answered VERIFIED | unchanged |
+| `FarmerVerificationRejected` | same | e-ijara answered REJECTED, or the partial unique index turned it into `LEASE_CONTRACT_ALREADY_CLAIMED` | unchanged |
+| `AccountRoleChanged` | same, right after `FarmerVerified` | `ROLE_FARMER` was actually granted (not when the account already held it) | + 1 |
+| `FarmerVerificationExpired` | the worker (`ExpireVerifications`) | a VERIFIED lease ended (the day after `valid_until`, Asia/Tashkent) | unchanged |
+| `AccountRoleChanged` | same, right after `FarmerVerificationExpired` | `ROLE_FARMER` was actually revoked (not while another VERIFIED lease remains) | + 1 |
+| `AccountPremiumChanged` | `SetAccountPremium` | Premium actually turned on or off | + 1 |
+
+- **Snapshot** (`account`): id, roles (sorted), `is_verified_farmer`,
+  `is_premium` (evaluated at `occurred_at`), `premium_until` (only while
+  Premium is active and has an end), version, created/updated time. It is the
+  account right after its own event, so in a pair such as `FarmerVerified` +
+  `AccountRoleChanged` the first carries the old version and roles, the second
+  the new ones. The farmer verification status is not in the snapshot (the
+  account version does not cover it); it travels in the `FarmerVerif*` events.
+- **Details**: `AccountRoleChanged` carries old and new role sets
+  (`previous_roles` → `roles`), `granted_roles` / `revoked_roles` and the
+  causing `farmer_verification_id`; `FarmerVerified` the verification id and
+  lease dates; `FarmerVerificationRejected` the id and `rejection_reason`;
+  `FarmerVerificationExpired` the id and the lease's last day;
+  `AccountPremiumChanged` the new `is_premium`. Contract numbers are not
+  published on this stream.
+- **No spurious events**: `AccountRoleChanged` only when the role set differs
+  (and the envelope's protovalidate rule refuses an empty change);
+  `AccountPremiumChanged` only when `is_premium` flips.
+
+### Metadata and headers
+
+UUIDv7 `event_id`; `event_type` = the concrete message's full name (e.g.
+`agrogram.events.v1.AccountRoleChanged`, `agrogram.events.v1.NotificationRequested`);
+producer `identity`; aggregate USER / user id; `aggregate_version` = the
+snapshot version (0 on the notification stream); `occurred_at` = the time of
+the state change; correlation id = `x-request-id` (a fresh UUIDv7 for worker
+jobs and for calls without one); `traceparent` / `tracestate` when present;
+`causation_id` empty (every identity event is caused by a command or by
+identity's own worker). Actor: the signed-in user; for `AccountCreated` the new
+account's user (auth-gateway only relays the sign-in); for an internal call
+without user headers the calling service (e.g. `{service: "order-escrow"}`);
+for worker jobs `{service: "identity"}`. Every envelope is validated with
 protovalidate before it is enqueued. Record headers: `content-type`,
 `event-type`, `event-id`, `x-request-id`, `traceparent`/`tracestate`.
 
-The account stream (`agrogram.identity.account.v1`, `AccountEvent`) cannot be
-published yet: `events/v1/account.proto` does not exist. See the
-`TODO(events)` list below.
+Notification requests: category ACCOUNT, params `lease_contract_number`
+(+ `rejection_reason`), subject `{RESOURCE_TYPE_FARMER_VERIFICATION, id}`,
+channels empty.
 
 ## Layout
 
@@ -80,7 +126,7 @@ services/identity/
 │   ├── config/              IDENTITY_* environment variables
 │   ├── domain/              Account, Verification, Lease, Decision; Asia/Tashkent dates
 │   ├── eijara/              e-ijara checker STUB and contract number format
-│   ├── events/              NotificationRequestEvent builder, outbox relay (franz-go)
+│   ├── events/              AccountEvent and NotificationRequestEvent builders, outbox relay (franz-go)
 │   ├── grpcserver/          handler, interceptors (recovery, principal, logging, validation)
 │   ├── health/              Postgres readiness -> gRPC health + /healthz, /readyz
 │   ├── log/                 slog (JSON or text)
@@ -198,9 +244,11 @@ make test-integration         # -tags=integration against IDENTITY_TEST_DATABASE
 
 The integration tests create a random schema (`identity_test_<hex>`), run
 the migrations into it through `search_path`, exercise the real repository
-(idempotency, the partial unique index, role grant/revoke, outbox) and the
-service end to end, roll the migrations back and forward, and drop the
-schema. The `identity` role owns its database, so it may create schemas.
+(idempotency, the partial unique index, role grant/revoke, plan changes,
+outbox) and the service end to end (including the order of the account and
+notification events in the outbox, and `SetAccountPremium`), roll the
+migrations back and forward, and drop the schema. The `identity` role owns
+its database, so it may create schemas.
 
 ### 6. Smoke test with grpcurl
 
@@ -232,14 +280,21 @@ grpcurl -plaintext -H "x-agrogram-user-id: $USER_ID" -d '{}' \
 # REJECTED path (stub hook), on a fresh account: contract numbers starting with INVALID
 #   ... -d "{\"request_id\":\"$(uuid)\",\"lease_contract_number\":\"INVALID-1\"}" ...
 
+# Premium on (order-escrow only); repeat it: same account, same version, no event
+grpcurl -plaintext -H 'x-agrogram-caller: order-escrow' \
+  -d "{\"user_id\":\"$USER_ID\",\"is_premium\":true}" \
+  $ADDR agrogram.identity.v1.IdentityService/SetAccountPremium
+
 # errors carry agrogram.common.v1.Error in the details
 grpcurl -plaintext -d '{}' $ADDR agrogram.identity.v1.IdentityService/GetAccount   # UNAUTHENTICATED
 
 grpcurl -plaintext -d '{"service":"agrogram.identity.v1.IdentityService"}' $ADDR grpc.health.v1.Health/Check
 ```
 
-The notification requests appear on `agrogram.notification.request.v1` in
-Kafka UI (http://127.0.0.1:18080); values are Protobuf binary.
+The account events appear on `agrogram.identity.account.v1` and the
+notification requests on `agrogram.notification.request.v1` in Kafka UI
+(http://127.0.0.1:18080); values are Protobuf binary, the `event-type` header
+names the event.
 
 ### Making a local admin
 
@@ -268,31 +323,25 @@ then call with `-H 'x-agrogram-user-id: <user uuid>' -H 'x-agrogram-roles: RESEL
 | `internal/eijara/eijara.go` (`Stub.Check`, answer) | Every other number: VERIFIED, lease from today for one year (Asia/Tashkent); location and area unset |
 | `cmd/identity/serve.go` | Wiring: `eijara.Stub` instead of a real client |
 
-## TODO(events)
+## TODOs
 
-`AccountEvent` on `agrogram.identity.account.v1` belongs at these points once
-`events/v1/account.proto` exists:
-
-| Where | Event |
-| --- | --- |
-| `internal/service/accounts.go` (`CreateAccount`) | account created |
-| `internal/service/verification.go` (`applyDecision`) | farmer verification decided |
-| `internal/service/verification.go` (`applyDecision`, grant) | roles changed (`ROLE_FARMER` granted) |
-| `internal/service/worker.go` (`ExpireVerifications`) | farmer verification expired |
-| `internal/service/worker.go` (`ExpireVerifications`, revoke) | roles changed (`ROLE_FARMER` revoked) |
-
-Also `TODO(billing)` (`internal/service/accounts.go`: nothing changes the plan
-yet) and `TODO(e-ijara)` (`internal/grpcserver/handler.go`: lease location and
-area).
+- `TODO(billing)` (`internal/service/accounts.go`, `internal/auth/auth.go`):
+  purchase and renewal of Premium are not designed. `SetAccountPremium` is the
+  on/off switch they will use; order-escrow is its only allowed caller until
+  billing has a service of its own.
+- `TODO(e-ijara)` (`internal/grpcserver/handler.go`): lease location and area.
 
 ## Known gaps
 
-- The proto has only the four RPCs above. Account update/delete, role
-  management and premium queries asked for elsewhere have no RPCs, so they
-  are not implemented (protos are frozen here). Roles, plan and premium are
-  exposed through `GetAccount`; `ROLE_FARMER` changes only through
-  verification and expiry; plan changes are `TODO(billing)`.
-- No account-stream events (see `TODO(events)`).
+- The proto has the five RPCs above. Account update/delete and role
+  management have no RPCs, so they are not implemented. Roles, plan and
+  premium are exposed through `GetAccount`; `ROLE_FARMER` changes only through
+  verification and expiry; Premium only through `SetAccountPremium`.
+- `premium_until` is not managed: `SetAccountPremium` clears it, and nothing in
+  identity sets it. A `premium_until` set by hand in SQL ends Premium silently:
+  no `AccountPremiumChanged` is published when it passes.
+- Account status (BLOCKED, DELETED) has no RPC and no event yet;
+  `SetAccountPremium` does not check the status.
 - e-ijara failures never surface as `DEPENDENCY_UNAVAILABLE` (the RPC comment
   lists it): by design the verification is returned PENDING and retried.
 - `LEASE_CONTRACT_INVALID` arrives as a REJECTED verification, not as an RPC

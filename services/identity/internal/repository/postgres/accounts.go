@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	commonv1 "github.com/tbilol/dxrl/gen/go/common/v1"
+	identityv1 "github.com/tbilol/dxrl/gen/go/identity/v1"
 
 	"github.com/tbilol/dxrl/services/identity/internal/domain"
 )
@@ -132,6 +133,23 @@ WHERE id IN (SELECT account_id FROM granted)`, id, name, now)
 		return false, fmt.Errorf("grant role %s: %w", name, err)
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+func (q *queries) SetPlan(ctx context.Context, id uuid.UUID, plan identityv1.Plan, now time.Time) error {
+	name, err := plans.text(plan)
+	if err != nil {
+		return err
+	}
+	tag, err := q.db.Exec(ctx, `
+UPDATE accounts SET plan = $2, premium_until = NULL, version = version + 1, updated_at = $3
+WHERE id = $1`, id, name, now)
+	if err != nil {
+		return fmt.Errorf("set plan %s: %w", name, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
 }
 
 func (q *queries) RevokeFarmerRoleUnlessVerified(ctx context.Context, id uuid.UUID, now time.Time) (bool, error) {

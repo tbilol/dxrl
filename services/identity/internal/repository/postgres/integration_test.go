@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -276,6 +277,21 @@ func TestIntegrationRepository(t *testing.T) {
 		}
 	})
 
+	t.Run("set plan", func(t *testing.T) {
+		c := createAccount(t, store, now)
+		later := now.Add(time.Minute)
+		if err := q.SetPlan(ctx, c.ID, domain.PlanPremium, later); err != nil {
+			t.Fatal(err)
+		}
+		got := must[domain.Account](t)(q.GetAccount(ctx, c.ID))
+		if got.Plan != domain.PlanPremium || got.PremiumUntil != nil || got.Version != 2 || !got.UpdatedAt.Equal(later) {
+			t.Fatalf("account = %+v", got)
+		}
+		if err := q.SetPlan(ctx, uuid.New(), domain.PlanDefault, now); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("missing account: %v", err)
+		}
+	})
+
 	t.Run("outbox", func(t *testing.T) {
 		msg, err := events.NewNotificationRequest(events.Notification{
 			RecipientID: a.ID, Category: eventsv1.NotificationCategory_NOTIFICATION_CATEGORY_ACCOUNT,
@@ -325,10 +341,48 @@ func TestIntegrationRepository(t *testing.T) {
 		if err != nil || !got.HasRole(commonv1.Role_ROLE_FARMER) || got.Version != 2 {
 			t.Fatalf("account: %+v %v", got, err)
 		}
-		var pendingEvents int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE published_at IS NULL AND record_key = $1`,
-			acct.ID.String()).Scan(&pendingEvents); err != nil || pendingEvents != 1 {
-			t.Fatalf("outbox rows = %d, %v", pendingEvents, err)
+		// The outbox, in commit order, all keyed by the user: the account
+		// stream and the notification request of the VERIFIED decision.
+		type outboxRow struct{ Topic, EventType string }
+		outboxRows := func() []outboxRow {
+			t.Helper()
+			rows, err := pool.Query(ctx, `SELECT topic, event_type FROM outbox
+WHERE published_at IS NULL AND record_key = $1 ORDER BY seq`, acct.ID.String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := pgx.CollectRows(rows, pgx.RowToStructByPos[outboxRow])
+			if err != nil {
+				t.Fatal(err)
+			}
+			return got
+		}
+		want := []outboxRow{
+			{events.TopicAccount, events.AccountCreatedType},
+			{events.TopicAccount, events.FarmerVerifiedType},
+			{events.TopicAccount, events.AccountRoleChangedType},
+			{events.TopicNotificationRequest, events.NotificationRequestedType},
+		}
+		if got := outboxRows(); !slices.Equal(got, want) {
+			t.Fatalf("outbox = %v, want %v", got, want)
+		}
+
+		// Premium on, then the same value again: one change, one event.
+		escrow := auth.Principal{Caller: auth.CallerOrderEscrow, RequestID: "it"}
+		on, err := svc.SetAccountPremium(ctx, escrow, acct.ID.String(), true)
+		if err != nil || !on.IsPremium || on.Plan != domain.PlanPremium || on.PremiumUntil != nil || on.Version != 3 {
+			t.Fatalf("premium on: %+v %v", on, err)
+		}
+		again, err := svc.SetAccountPremium(ctx, escrow, acct.ID.String(), true)
+		if err != nil || !again.IsPremium || again.Version != 3 {
+			t.Fatalf("premium on again: %+v %v", again, err)
+		}
+		want = append(want, outboxRow{events.TopicAccount, events.AccountPremiumChangedType})
+		if got := outboxRows(); !slices.Equal(got, want) {
+			t.Fatalf("outbox = %v, want %v", got, want)
+		}
+		if _, err := svc.SetAccountPremium(ctx, escrow, uuid.NewString(), true); err == nil {
+			t.Fatal("unknown account accepted")
 		}
 	})
 

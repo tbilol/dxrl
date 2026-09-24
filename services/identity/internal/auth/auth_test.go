@@ -69,6 +69,32 @@ func TestFromMetadataAnonymousAndSanitized(t *testing.T) {
 	}
 }
 
+func TestActor(t *testing.T) {
+	user := uuid.New()
+	tests := []struct {
+		name        string
+		p           Principal
+		wantUser    string
+		wantService string
+	}{
+		{"signed-in user", Principal{UserID: user}, user.String(), ""},
+		{"user headers forwarded by a service", Principal{UserID: user, Caller: CallerOrderEscrow}, user.String(), ""},
+		{"service acting on its own", Principal{Caller: CallerOrderEscrow}, "", CallerOrderEscrow},
+		{"neither", Principal{}, "", ServiceName},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := tt.p.Actor()
+			if a.GetUserId() != tt.wantUser || a.GetService() != tt.wantService {
+				t.Fatalf("Actor() = %v", a)
+			}
+		})
+	}
+	if a := UserActor(user); a.GetUserId() != user.String() {
+		t.Fatalf("UserActor = %v", a)
+	}
+}
+
 func TestFromMetadataRejectsBadUserID(t *testing.T) {
 	for _, bad := range []string{"42", uuid.Nil.String()} {
 		_, err := FromMetadata(metadata.Pairs(HeaderUserID, bad))
@@ -122,6 +148,14 @@ func TestAuthorizationRules(t *testing.T) {
 	for _, p := range []Principal{user, admin, internal} {
 		if ae := apperr.From(RequireCaller(p, CallerAuthGateway)); ae == nil || ae.Code != codes.PermissionDenied {
 			t.Fatalf("RequireCaller(%+v) = %v", p, ae)
+		}
+	}
+	if err := RequireCaller(internal, CallerOrderEscrow); err != nil { // internal is order-escrow
+		t.Fatal(err)
+	}
+	for _, p := range []Principal{user, admin, {Caller: CallerAuthGateway}} {
+		if ae := apperr.From(RequireCaller(p, CallerOrderEscrow)); ae == nil || ae.Code != codes.PermissionDenied {
+			t.Fatalf("RequireCaller(%+v, order-escrow) = %v", p, ae)
 		}
 	}
 }

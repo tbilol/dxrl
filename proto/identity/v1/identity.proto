@@ -39,6 +39,15 @@ service IdentityService {
   // Returns a user's latest farmer verification. NOT_FOUND if they never
   // submitted one.
   rpc GetFarmerVerification(GetFarmerVerificationRequest) returns (GetFarmerVerificationResponse);
+
+  // Internal (order-escrow). Turns Premium on (plan PREMIUM, no end date) or
+  // off (plan DEFAULT). A change bumps the account version and publishes
+  // AccountPremiumChanged on the account stream (events/v1/account.proto).
+  // Setting the value the account already has changes nothing and publishes
+  // nothing. TODO(billing): purchase and renewal are not designed; they will
+  // use this switch.
+  // Errors: PERMISSION_DENIED (any other caller), NOT_FOUND.
+  rpc SetAccountPremium(SetAccountPremiumRequest) returns (SetAccountPremiumResponse);
 }
 
 // Plan is a subscription plan. Limits live in the plan configuration; the
@@ -223,4 +232,19 @@ message GetFarmerVerificationRequest {
 message GetFarmerVerificationResponse {
   // The latest verification.
   FarmerVerification verification = 1;
+}
+
+// SetAccountPremiumRequest is the input of SetAccountPremium.
+message SetAccountPremiumRequest {
+  // Account to change (UUID).
+  string user_id = 1 [(buf.validate.field).string.uuid = true];
+
+  // true turns Premium on, false turns it off.
+  bool is_premium = 2;
+}
+
+// SetAccountPremiumResponse is the output of SetAccountPremium.
+message SetAccountPremiumResponse {
+  // The account after the call.
+  Account account = 1;
 }

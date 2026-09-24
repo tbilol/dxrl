@@ -22,9 +22,7 @@ deadletter_retention_ms=1209600000 # metadata.proto: "delete after 14 days"
 # Aggregate streams, agrogram.<producer>.<aggregate>.v1. Record key: the
 # aggregate id, so all events of one aggregate stay ordered on one partition.
 stream_topics=(
-  # Planned stream: listed in metadata.proto, but events/v1 has no
-  # account.proto (AccountEvent) yet. Created now so identity can publish
-  # without an infra change.
+  # AccountEvent (events/v1/account.proto), published by identity.
   agrogram.identity.account.v1
   agrogram.profilesocial.profile.v1
   agrogram.catalog.listing.v1

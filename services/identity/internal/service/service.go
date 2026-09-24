@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	commonv1 "github.com/tbilol/dxrl/gen/go/common/v1"
+	identityv1 "github.com/tbilol/dxrl/gen/go/identity/v1"
 
 	"github.com/tbilol/dxrl/services/identity/internal/apperr"
 	"github.com/tbilol/dxrl/services/identity/internal/domain"
@@ -31,6 +32,9 @@ type Queries interface {
 	// RevokeFarmerRoleUnlessVerified removes ROLE_FARMER (bumping the
 	// version) unless a VERIFIED verification remains; false if unchanged.
 	RevokeFarmerRoleUnlessVerified(ctx context.Context, id uuid.UUID, now time.Time) (bool, error)
+	// SetPlan sets the plan with no Premium end date (premium_until cleared)
+	// and bumps the version; domain.ErrNotFound if the account is missing.
+	SetPlan(ctx context.Context, id uuid.UUID, plan identityv1.Plan, now time.Time) error
 
 	GetVerification(ctx context.Context, id uuid.UUID) (domain.Verification, error)
 	VerificationByRequest(ctx context.Context, userID, requestID uuid.UUID) (domain.Verification, error)
@@ -144,11 +148,15 @@ func notFound(what string, id uuid.UUID) error {
 
 func newID() (uuid.UUID, error) { return uuid.NewV7() }
 
-func parseRequestID(s string) (uuid.UUID, error) {
+func parseRequestID(s string) (uuid.UUID, error) { return parseID("request_id", s) }
+
+// parseID parses the UUID request field named field (the gRPC layer has
+// validated it already; this guards direct callers).
+func parseID(field, s string) (uuid.UUID, error) {
 	id, err := uuid.Parse(s)
 	if err != nil {
 		return uuid.Nil, apperr.Validation(&commonv1.FieldViolation{
-			Field: "request_id", Description: "value must be a valid UUID", Rule: "string.uuid",
+			Field: field, Description: "value must be a valid UUID", Rule: "string.uuid",
 		})
 	}
 	return id, nil

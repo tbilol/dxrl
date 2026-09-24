@@ -26,14 +26,17 @@ import (
 	"github.com/tbilol/dxrl/services/identity/internal/domain"
 )
 
-// stubService records the principal and answers from its fields.
+// stubService records the principal (and the SetAccountPremium arguments) and
+// answers from its fields.
 type stubService struct {
-	got   auth.Principal
-	calls int
-	err   error
-	panic bool
-	acct  domain.Account
-	verif domain.Verification
+	got        auth.Principal
+	calls      int
+	err        error
+	panic      bool
+	acct       domain.Account
+	verif      domain.Verification
+	gotUserID  string
+	gotPremium bool
 }
 
 func (s *stubService) answer(p auth.Principal) error {
@@ -58,6 +61,11 @@ func (s *stubService) SubmitFarmerVerification(_ context.Context, p auth.Princip
 
 func (s *stubService) GetFarmerVerification(_ context.Context, p auth.Principal, _ string) (domain.Verification, error) {
 	return s.verif, s.answer(p)
+}
+
+func (s *stubService) SetAccountPremium(_ context.Context, p auth.Principal, userID string, premium bool) (domain.Account, error) {
+	s.gotUserID, s.gotPremium = userID, premium
+	return s.acct, s.answer(p)
 }
 
 func dial(t *testing.T, svc Service) (identityv1.IdentityServiceClient, healthpb.HealthClient) {
@@ -159,6 +167,45 @@ func TestPrincipalAndResponseMapping(t *testing.T) {
 	if lease.GetValidFrom().GetYear() != 2026 || lease.GetValidUntil().GetYear() != 2027 || lease.GetValidUntil().GetMonth() != 9 ||
 		lease.GetValidUntil().GetDay() != 22 || lease.GetLocation() != nil || vr.GetVerification().GetDecidedAt() == nil {
 		t.Fatalf("verification = %v", vr.GetVerification())
+	}
+}
+
+func TestSetAccountPremium(t *testing.T) {
+	user := uuid.New()
+	now := time.Date(2026, 9, 22, 10, 0, 0, 0, time.UTC)
+	svc := &stubService{acct: domain.Account{ID: user, Roles: []commonv1.Role{domain.RoleReseller}, Status: domain.AccountActive,
+		Plan: domain.PlanPremium, IsPremium: true, Version: 2, CreatedAt: now, UpdatedAt: now}}
+	client, _ := dial(t, svc)
+
+	// user_id is required and must be a UUID; invalid requests never reach the service.
+	for bad, rule := range map[string]string{"": "string.uuid_empty", "42": "string.uuid"} {
+		_, err := client.SetAccountPremium(context.Background(), &identityv1.SetAccountPremiumRequest{UserId: bad, IsPremium: true})
+		e := detail(t, err, codes.InvalidArgument)
+		if len(e.GetFieldViolations()) != 1 || e.GetFieldViolations()[0].GetField() != "user_id" ||
+			e.GetFieldViolations()[0].GetRule() != rule {
+			t.Fatalf("%q: error = %v", bad, e)
+		}
+	}
+	if svc.calls != 0 {
+		t.Fatalf("service called %d times for invalid requests", svc.calls)
+	}
+
+	ctx := metadata.AppendToOutgoingContext(context.Background(), auth.HeaderCaller, auth.CallerOrderEscrow)
+	resp, err := client.SetAccountPremium(ctx, &identityv1.SetAccountPremiumRequest{UserId: user.String(), IsPremium: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svc.got.Caller != auth.CallerOrderEscrow || svc.gotUserID != user.String() || !svc.gotPremium {
+		t.Fatalf("service got caller=%q user_id=%q premium=%v", svc.got.Caller, svc.gotUserID, svc.gotPremium)
+	}
+	if a := resp.GetAccount(); a.GetId() != user.String() || !a.GetIsPremium() || a.GetPlan() != domain.PlanPremium || a.GetVersion() != 2 {
+		t.Fatalf("account = %v", a)
+	}
+
+	svc.err = apperr.New(commonv1.ErrorReason_ERROR_REASON_PERMISSION_DENIED, "only order-escrow may call this method")
+	_, err = client.SetAccountPremium(context.Background(), &identityv1.SetAccountPremiumRequest{UserId: user.String()})
+	if e := detail(t, err, codes.PermissionDenied); e.GetReason() != commonv1.ErrorReason_ERROR_REASON_PERMISSION_DENIED {
+		t.Fatalf("error = %v", e)
 	}
 }
 

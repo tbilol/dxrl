@@ -29,8 +29,15 @@ const (
 	HeaderTracestate  = "tracestate"
 )
 
-// CallerAuthGateway is the only caller allowed to create accounts.
-const CallerAuthGateway = "auth-gateway"
+// Internal callers (x-agrogram-caller) that internal-only RPCs accept.
+const (
+	// CallerAuthGateway is the only caller allowed to create accounts.
+	CallerAuthGateway = "auth-gateway"
+	// CallerOrderEscrow is the only caller allowed to turn Premium on or off
+	// (SetAccountPremium). TODO(billing): premium billing is not designed; if
+	// it becomes a service of its own, that service's name belongs here.
+	CallerOrderEscrow = "order-escrow"
+)
 
 // ServiceName is identity's own name, used as the actor of background work.
 const ServiceName = "identity"
@@ -108,12 +115,21 @@ func (p Principal) Internal() bool { return p.Caller != "" }
 // HasRole reports whether the token-time role set holds r.
 func (p Principal) HasRole(r commonv1.Role) bool { return slices.Contains(p.Roles, r) }
 
-// Actor is the user performing the request, for events and audit trails.
+// Actor is who performs the request, for events and audit trails: the
+// signed-in user; without one, the calling service; otherwise identity.
 func (p Principal) Actor() *commonv1.Actor {
-	if p.Authenticated() {
-		return &commonv1.Actor{Kind: &commonv1.Actor_UserId{UserId: p.UserID.String()}}
+	switch {
+	case p.Authenticated():
+		return UserActor(p.UserID)
+	case p.Internal():
+		return &commonv1.Actor{Kind: &commonv1.Actor_Service{Service: p.Caller}}
 	}
 	return ServiceActor()
+}
+
+// UserActor is a user acting through the app.
+func UserActor(id uuid.UUID) *commonv1.Actor {
+	return &commonv1.Actor{Kind: &commonv1.Actor_UserId{UserId: id.String()}}
 }
 
 // ServiceActor is identity acting on its own (the background worker).

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	eventsv1 "github.com/tbilol/dxrl/gen/go/events/v1"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -77,7 +78,7 @@ func messages(t *testing.T, n int) []Message {
 
 func newKafka(t *testing.T) (*kfake.Cluster, *kgo.Client) {
 	t.Helper()
-	cluster, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.SeedTopics(3, TopicNotificationRequest))
+	cluster, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.SeedTopics(3, TopicNotificationRequest, TopicAccount))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,11 +91,14 @@ func newKafka(t *testing.T) (*kfake.Cluster, *kgo.Client) {
 	return cluster, producer
 }
 
-func consumeAll(t *testing.T, cluster *kfake.Cluster, want int) map[string]*kgo.Record {
+func consumeAll(t *testing.T, cluster *kfake.Cluster, want int, topics ...string) map[string]*kgo.Record {
 	t.Helper()
+	if len(topics) == 0 {
+		topics = []string{TopicNotificationRequest}
+	}
 	consumer, err := kgo.NewClient(
 		kgo.SeedBrokers(cluster.ListenAddrs()...),
-		kgo.ConsumeTopics(TopicNotificationRequest),
+		kgo.ConsumeTopics(topics...),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 	)
 	if err != nil {
@@ -157,6 +161,40 @@ func TestRelayPublishesOutboxToKafka(t *testing.T) {
 		if headers[HeaderContentType] != ContentType || headers[HeaderEventType] != NotificationRequestedType {
 			t.Fatalf("headers = %v", headers)
 		}
+	}
+}
+
+func TestRelayPublishesAccountEventsKeyedByUser(t *testing.T) {
+	cluster, producer := newKafka(t)
+	change := sampleChange(&eventsv1.AccountCreated{})
+	created, err := NewAccountEvent(change)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change.Event = &eventsv1.AccountPremiumChanged{IsPremium: true} // same account
+	premium, err := NewAccountEvent(change)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notification := messages(t, 1)[0]
+	store := newMemOutbox(created, premium, notification)
+	relay := NewRelay(store, producer, RelayConfig{BatchSize: 10}, slog.New(slog.DiscardHandler))
+	if n, err := relay.RunOnce(context.Background()); err != nil || n != 3 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+
+	records := consumeAll(t, cluster, 3, TopicAccount, TopicNotificationRequest)
+	for _, m := range []Message{created, premium, notification} {
+		r := records[m.ID.String()]
+		if r == nil {
+			t.Fatalf("event %s not in Kafka", m.ID)
+		}
+		if r.Topic != m.Topic || string(r.Key) != m.Key || !bytes.Equal(r.Value, m.Value) {
+			t.Fatalf("record %s: topic=%s key=%s, want %s/%s", m.ID, r.Topic, r.Key, m.Topic, m.Key)
+		}
+	}
+	if created.Topic != TopicAccount || created.Key != premium.Key {
+		t.Fatalf("account events: topic %s, keys %s and %s", created.Topic, created.Key, premium.Key)
 	}
 }
 

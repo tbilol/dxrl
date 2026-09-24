@@ -19,6 +19,7 @@ type Service interface {
 	GetAccount(ctx context.Context, p auth.Principal, userID string) (domain.Account, error)
 	SubmitFarmerVerification(ctx context.Context, p auth.Principal, requestID, contractNumber string) (domain.Verification, error)
 	GetFarmerVerification(ctx context.Context, p auth.Principal, userID string) (domain.Verification, error)
+	SetAccountPremium(ctx context.Context, p auth.Principal, userID string, premium bool) (domain.Account, error)
 }
 
 // handler maps agrogram.identity.v1.IdentityService onto Service. Requests
@@ -63,6 +64,14 @@ func (h *handler) GetFarmerVerification(ctx context.Context, req *identityv1.Get
 		return nil, err
 	}
 	return &identityv1.GetFarmerVerificationResponse{Verification: verificationProto(v)}, nil
+}
+
+func (h *handler) SetAccountPremium(ctx context.Context, req *identityv1.SetAccountPremiumRequest) (*identityv1.SetAccountPremiumResponse, error) {
+	a, err := h.svc.SetAccountPremium(ctx, principal(ctx), req.GetUserId(), req.GetIsPremium())
+	if err != nil {
+		return nil, err
+	}
+	return &identityv1.SetAccountPremiumResponse{Account: accountProto(a)}, nil
 }
 
 func accountProto(a domain.Account) *identityv1.Account {

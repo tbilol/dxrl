@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v5"
 	commonv1 "github.com/tbilol/dxrl/gen/go/common/v1"
+	identityv1 "github.com/tbilol/dxrl/gen/go/identity/v1"
 
 	"github.com/tbilol/dxrl/services/identity/internal/domain"
 	"github.com/tbilol/dxrl/services/identity/internal/events"
@@ -134,6 +135,29 @@ func TestCreateAccount(t *testing.T) {
 		if err != nil || created || got.ID != existing || got.Version != 4 {
 			t.Fatalf("got %+v created=%v err=%v", got, created, err)
 		}
+	})
+}
+
+func TestSetPlan(t *testing.T) {
+	mock, store := newMock(t)
+	id := uuid.New()
+	now := time.Date(2026, 9, 22, 10, 0, 0, 0, time.UTC)
+	mock.ExpectExec(`UPDATE accounts SET plan = \$2, premium_until = NULL, version = version \+ 1, updated_at = \$3`).
+		WithArgs(id, "PREMIUM", now).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`UPDATE accounts SET plan`).WithArgs(id, "DEFAULT", now).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	_ = store.Run(ctx, func(q service.Queries) error {
+		if err := q.SetPlan(ctx, id, domain.PlanPremium, now); err != nil {
+			t.Errorf("premium: %v", err)
+		}
+		if err := q.SetPlan(ctx, id, domain.PlanDefault, now); !errors.Is(err, domain.ErrNotFound) {
+			t.Errorf("missing account: %v", err)
+		}
+		if err := q.SetPlan(ctx, id, identityv1.Plan_PLAN_UNSPECIFIED, now); err == nil {
+			t.Error("PLAN_UNSPECIFIED must not be storable")
+		}
+		return nil
 	})
 }
 
@@ -304,6 +328,13 @@ func TestEnumMapsRoundTrip(t *testing.T) {
 			return "", err
 		}
 		return verificationStatuses.text(v)
+	})
+	check("plan", []string{"DEFAULT", "PREMIUM"}, func(s string) (string, error) {
+		v, err := plans.value(s)
+		if err != nil {
+			return "", err
+		}
+		return plans.text(v)
 	})
 	if _, err := roles.text(commonv1.Role_ROLE_UNSPECIFIED); err == nil {
 		t.Error("ROLE_UNSPECIFIED must not be storable")

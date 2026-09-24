@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	commonv1 "github.com/tbilol/dxrl/gen/go/common/v1"
+	identityv1 "github.com/tbilol/dxrl/gen/go/identity/v1"
 
 	"github.com/tbilol/dxrl/services/identity/internal/domain"
 	"github.com/tbilol/dxrl/services/identity/internal/eijara"
@@ -24,6 +25,9 @@ type fakeDB struct {
 	verifications map[uuid.UUID]domain.Verification
 	lastErrors    map[uuid.UUID]string
 	outbox        []events.Message
+	// outboxErr, when set, makes EnqueueOutbox fail (the transaction then
+	// rolls back, like a failed INSERT INTO outbox).
+	outboxErr error
 }
 
 func (d *fakeDB) clone() *fakeDB {
@@ -33,6 +37,7 @@ func (d *fakeDB) clone() *fakeDB {
 		verifications: maps.Clone(d.verifications),
 		lastErrors:    maps.Clone(d.lastErrors),
 		outbox:        slices.Clone(d.outbox),
+		outboxErr:     d.outboxErr,
 	}
 	for id, a := range c.accounts {
 		a.Roles = slices.Clone(a.Roles)
@@ -150,6 +155,17 @@ func (q *fakeQueries) RevokeFarmerRoleUnlessVerified(_ context.Context, id uuid.
 	a.UpdatedAt = now
 	q.db.accounts[id] = a
 	return true, nil
+}
+
+func (q *fakeQueries) SetPlan(_ context.Context, id uuid.UUID, plan identityv1.Plan, now time.Time) error {
+	a, ok := q.db.accounts[id]
+	if !ok {
+		return domain.ErrNotFound
+	}
+	a.Plan, a.PremiumUntil, a.UpdatedAt = plan, nil, now
+	a.Version++
+	q.db.accounts[id] = a
+	return nil
 }
 
 func (q *fakeQueries) GetVerification(_ context.Context, id uuid.UUID) (domain.Verification, error) {
@@ -272,6 +288,9 @@ func (q *fakeQueries) ExpireVerification(_ context.Context, id uuid.UUID, today,
 }
 
 func (q *fakeQueries) EnqueueOutbox(_ context.Context, m events.Message) error {
+	if q.db.outboxErr != nil {
+		return q.db.outboxErr
+	}
 	q.db.outbox = append(q.db.outbox, m)
 	return nil
 }
