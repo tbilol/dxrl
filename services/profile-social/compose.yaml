@@ -1,0 +1,92 @@
+# profile-social on top of the local infrastructure stack.
+#
+# Always used together with back/deploy/docker-compose.yml, which defines
+# postgres, redis, kafka, kafka-init and the `agrogram` network. From the
+# directory that contains back/:
+#
+#   docker compose -f back/deploy/docker-compose.yml -f back/services/profile-social/compose.yaml \
+#     up -d --build --wait profile-social
+#
+# (or `make compose-up` in back/services/profile-social). With several -f files,
+# Compose resolves relative paths against the FIRST file's directory
+# (back/deploy/) and reads back/deploy/.env for interpolation; hence the build
+# context `..` (= back/) and the passwords from PROFILE_SOCIAL_DB_PASSWORD and
+# REDIS_PASSWORD, which that .env already defines.
+#
+# profile-social calls no other service at start-up: it consumes identity's
+# account stream from Kafka (agrogram.identity.account.v1) and calls catalog
+# over gRPC only for ListUserListings. It therefore does not depend on the
+# identity or auth-gateway containers; to run all three, add their compose
+# files too (README.md, "Run alongside identity and auth-gateway").
+#
+# Needs `make gen` in back/services/profile-social beforehand (the image
+# compiles against back/gen/go).
+
+x-profile-social-image: &profile-social-image
+  image: agrogram/profile-social:dev
+  build:
+    context: ..
+    dockerfile: services/profile-social/Dockerfile
+
+x-profile-social-env: &profile-social-env
+  # In-network addresses; passwords come from back/deploy/.env.
+  PROFILE_SOCIAL_DATABASE_URL: postgres://profile_social:${PROFILE_SOCIAL_DB_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}@postgres:5432/profile_social?sslmode=disable
+  PROFILE_SOCIAL_REDIS_URL: redis://:${REDIS_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}@redis:6379/0
+  PROFILE_SOCIAL_KAFKA_BROKERS: kafka:9092
+  # TODO(catalog): catalog is not built yet. Empty: ListUserListings answers an
+  # empty page (with a warning). Set it to catalog:50051 once catalog runs.
+  PROFILE_SOCIAL_CATALOG_ADDR: ${PROFILE_SOCIAL_CATALOG_ADDR:-}
+  PROFILE_SOCIAL_GRPC_ADDR: ":50051"
+  PROFILE_SOCIAL_HTTP_ADDR: ":8081"
+  PROFILE_SOCIAL_LOG_FORMAT: json
+  PROFILE_SOCIAL_LOG_LEVEL: ${PROFILE_SOCIAL_LOG_LEVEL:-info}
+  # Local stack only: lets grpcurl discover the API. Keep it off elsewhere.
+  PROFILE_SOCIAL_GRPC_REFLECTION: ${PROFILE_SOCIAL_GRPC_REFLECTION:-true}
+
+services:
+  # One-shot: applies the migrations, then exits 0; profile-social waits for it.
+  profile-social-migrate:
+    <<: *profile-social-image
+    command: ["migrate", "up"]
+    restart: "no"
+    environment: *profile-social-env
+    networks: [agrogram]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The image HEALTHCHECK probes the HTTP server, which `migrate` never starts.
+    healthcheck:
+      disable: true
+
+  profile-social:
+    <<: *profile-social-image
+    restart: unless-stopped
+    environment: *profile-social-env
+    networks: [agrogram]
+    depends_on:
+      profile-social-migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    ports:
+      # gRPC and health on the host, loopback only (identity uses 15051/18051,
+      # auth-gateway 15052/18052).
+      - "127.0.0.1:${PROFILE_SOCIAL_GRPC_PORT:-15053}:50051"
+      - "127.0.0.1:${PROFILE_SOCIAL_HTTP_PORT:-18053}:8081"
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "/profile-social", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+      start_interval: 2s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
