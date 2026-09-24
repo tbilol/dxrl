@@ -2,11 +2,13 @@
 #
 # Run every target from this directory (back/services/identity).
 #
-#   gen       needs curl and network access only: it downloads the pinned buf
-#             release binary into a user cache OUTSIDE the repo, verifies it
-#             against the release's sha256.txt, runs `buf generate` from back/
-#             with back/buf.gen.yaml (remote BSR plugins), and writes
-#             back/gen/go/go.mod so the generated Go code is a module.
+#   gen       delegates to the shared tooling, back/tools/codegen.sh: it needs
+#             curl and network access only, downloads the pinned buf release
+#             binary into a user cache OUTSIDE the repo, verifies it against the
+#             release's sha256.txt, runs `buf generate` from back/ with
+#             back/buf.gen.yaml (remote BSR plugins), and writes back/gen/go/
+#             go.mod so the generated Go code is a module. `make proto-gen-local`
+#             in back/ runs exactly the same thing.
 #   Go        targets need a Go toolchain; go.mod selects the version and
 #             GOTOOLCHAIN=auto (the default) downloads it.
 #   run, migrate-*, test-integration
@@ -18,27 +20,12 @@
 SHELL := /bin/sh
 .DEFAULT_GOAL := help
 
-BACK_DIR   := ../..
-GEN_GO_DIR := $(BACK_DIR)/gen/go
+BACK_DIR := ../..
 
-# Same version back/Makefile pins for its Docker-based buf.
-BUF_VERSION ?= 1.73.0
-TOOLS_DIR   ?= $(or $(XDG_CACHE_HOME),$(HOME)/.cache)/agrogram/bin
-BUF         := $(TOOLS_DIR)/buf-$(BUF_VERSION)
-
-# Release assets are buf-<uname -s>-<arch>: Linux-x86_64, Linux-aarch64,
-# Darwin-x86_64, Darwin-arm64.
-UNAME_S  := $(shell uname -s)
-UNAME_M  := $(shell uname -m)
-BUF_ARCH := $(UNAME_M)
-ifeq ($(UNAME_S)-$(UNAME_M),Linux-arm64)
-BUF_ARCH := aarch64
-endif
-ifeq ($(UNAME_S)-$(UNAME_M),Darwin-aarch64)
-BUF_ARCH := arm64
-endif
-BUF_ASSET := buf-$(UNAME_S)-$(BUF_ARCH)
-BUF_URL   := https://github.com/bufbuild/buf/releases/download/v$(BUF_VERSION)
+# Shared codegen tooling: defines CODEGEN (back/tools/codegen.sh), GEN_GO_DIR
+# and the single pinned BUF_VERSION. Override with BUF_VERSION=, TOOLS_DIR= (the
+# binary cache) or BUF=<path to an existing buf>.
+include $(BACK_DIR)/tools/codegen.mk
 
 GO           ?= go
 GOTEST_FLAGS ?=
@@ -58,37 +45,18 @@ COMPOSE := cd $(BACK_DIR) && $(DOCKER) compose -f deploy/docker-compose.yml -f s
 	compose-up compose-down compose-logs clean
 
 help: ## List targets
-	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-18s %s\n", $$1, $$2}'
+	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-18s %s\n", $$1, $$2}'
 
-tools: $(BUF) ## Download and verify the pinned buf binary (cached outside the repo)
-	@"$(BUF)" --version
+tools: ## Download and verify the pinned buf binary (cached outside the repo)
+	@$(CODEGEN) tools
 
-$(BUF):
-	@set -eu; \
-	mkdir -p "$(TOOLS_DIR)"; \
-	tmp="$$(mktemp -d "$(TOOLS_DIR)/.buf-download.XXXXXX")"; \
-	trap 'rm -rf "$$tmp"' EXIT INT TERM; \
-	echo "Downloading buf $(BUF_VERSION) ($(BUF_ASSET)) into $(TOOLS_DIR)"; \
-	curl -fsSL --retry 3 -o "$$tmp/buf" "$(BUF_URL)/$(BUF_ASSET)"; \
-	curl -fsSL --retry 3 -o "$$tmp/sha256.txt" "$(BUF_URL)/sha256.txt"; \
-	want="$$(awk -v f="$(BUF_ASSET)" '$$2 == f {print $$1}' "$$tmp/sha256.txt")"; \
-	if [ -z "$$want" ]; then echo "sha256.txt has no entry for $(BUF_ASSET)" >&2; exit 1; fi; \
-	if command -v sha256sum >/dev/null 2>&1; then got="$$(sha256sum "$$tmp/buf" | awk '{print $$1}')"; \
-	else got="$$(shasum -a 256 "$$tmp/buf" | awk '{print $$1}')"; fi; \
-	if [ "$$got" != "$$want" ]; then echo "checksum mismatch for $(BUF_ASSET): got $$got, want $$want" >&2; exit 1; fi; \
-	chmod +x "$$tmp/buf"; \
-	mv "$$tmp/buf" "$@"; \
-	echo "buf $(BUF_VERSION) OK (sha256 $$got)"
-
-gen: $(BUF) ## Generate back/gen (Go, Python, Java) with the pinned buf; write gen/go/go.mod
-	cd $(BACK_DIR) && "$(BUF)" generate
-	cp gen-go.mod.tmpl $(GEN_GO_DIR)/go.mod
-	@echo "Wrote $(GEN_GO_DIR)/go.mod (module github.com/tbilol/dxrl/gen/go)"
+gen: ## Generate back/gen (Go, Python, Java) with the pinned buf; write gen/go/go.mod
+	$(CODEGEN) generate
 
 gen-check:
 	@test -f $(GEN_GO_DIR)/go.mod || { \
 		echo "$(GEN_GO_DIR)/go.mod is missing. Generate the code first: make gen" >&2; \
-		echo "(back/'s 'make proto-gen' wipes gen/ and does not write it; re-run 'make gen' here after it.)" >&2; \
+		echo "(or, from back/: 'make proto-gen-local', or 'make proto-gen' for the Docker path.)" >&2; \
 		exit 1; }
 
 tidy: gen-check ## go mod tidy

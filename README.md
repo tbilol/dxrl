@@ -6,9 +6,9 @@ e-ijara-verified farmers, escrow-protected transactions (*tranzaksiya*), yield
 estimation and market statistics.
 
 > **Status: Phase 0, contracts and skeleton only.** This tree holds the service
-> contracts (Protobuf/gRPC and Kafka events), Docker-based code generation, and
-> an empty scaffold per service. There is no business logic, no database code
-> and no handlers yet.
+> contracts (Protobuf/gRPC and Kafka events), code generation (Docker or a
+> pinned local buf), and an empty scaffold per service. There is no business
+> logic, no database code and no handlers yet.
 
 ## Architecture
 
@@ -85,36 +85,60 @@ back/
 ├── buf.yaml                   # buf module, lint and breaking rules, deps (protovalidate)
 ├── buf.lock                   # pinned dependency versions
 ├── buf.gen.yaml               # codegen: Go, Python, Java via BSR remote plugins
-├── Makefile                   # every buf command, executed in the bufbuild/buf container
+├── tools/                     # shared codegen tooling, used by back/ and every service:
+│                              #   buf.version (the one pin), codegen.sh (download, verify,
+│                              #   generate, write gen/go/go.mod), gen-go.mod.tmpl, codegen.mk
+├── Makefile                   # buf in the bufbuild/buf container, plus proto-gen-local
 └── gen/                       # generated code (git-ignored, reproducible)
 ```
 
 The legacy FastAPI prototype files also live at the root of `back/`. See
 [Legacy prototype](#legacy-prototype).
 
-## Code generation (Docker only)
+## Code generation
 
-Code generation needs only **Docker** and network access to `buf.build`. You
-do not need a local `protoc`, `buf` or `protoc-gen-*` plugin. Every target runs
-`bufbuild/buf:1.73.0` in a throwaway container as your own user, and all plugins
-are BSR *remote* plugins.
+Two paths produce the same `gen/`, both with buf **1.73.0** and BSR *remote*
+plugins. You never need a local `protoc` or `protoc-gen-*` plugin.
+
+- **Docker** (`proto-*`): every target runs `bufbuild/buf:1.73.0` in a
+  throwaway container as your own user. Requires Docker.
+- **Local** (`proto-gen-local`, which is also what each service's `make gen`
+  runs): `tools/codegen.sh` downloads the pinned buf release binary into
+  `${XDG_CACHE_HOME:-~/.cache}/agrogram/bin` — outside the repo — verifies it
+  against the release's `sha256.txt` and reuses it from then on. Requires curl.
 
 ```sh
 cd back
 make help             # list targets
 make proto            # format check + lint + generate (what CI should run)
-make proto-gen        # generate code into gen/
+make proto-gen        # generate code into gen/ (Docker)
+make proto-gen-local  # the same, with the pinned local buf (no Docker)
 make proto-lint       # style, comment and protovalidate rules
 make proto-format     # rewrite .proto files canonically
 make proto-breaking   # compare with main (after the contracts are committed there)
 make proto-deps       # refresh buf.lock after changing deps in buf.yaml
 ```
 
+Both generating targets also write `gen/go/go.mod` from
+`tools/gen-go.mod.tmpl`, which is what makes `gen/go` the Go module the
+services `replace`. It has to be rewritten every time because `buf.gen.yaml`
+sets `clean: true`.
+
+The shared tooling in `tools/` is the single implementation: `buf.version`
+holds the only version pin, `codegen.sh` the only download-and-verify logic and
+`gen-go.mod.tmpl` the only module template; `codegen.mk` carries the variables
+that `back/Makefile` and every `services/*/Makefile` include. Environment
+overrides: `BUF_VERSION`, `TOOLS_DIR` (the binary cache) and `BUF` (path to an
+existing buf binary, skipping the download).
+
 Without `make`, run the same command directly:
 
 ```sh
 docker run --rm -v "$PWD:/workspace" -w /workspace --user "$(id -u):$(id -g)" \
   -e BUF_CACHE_DIR=/workspace/.buf-cache bufbuild/buf:1.73.0 generate
+./tools/codegen.sh go-mod   # then write gen/go/go.mod
+
+./tools/codegen.sh generate # or do both with the local buf
 ```
 
 | Output | Language / import | Plugins (pinned) | Used by |

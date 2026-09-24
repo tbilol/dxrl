@@ -1,0 +1,12 @@
+# Build and test outputs
+/bin/
+*.test
+*.out
+coverage.*
+
+# Local settings (back/.gitignore ignores .env too; .env.example is committed)
+.env
+
+# Signing keys. `make dev-key` writes secrets/jwt-es256.pem here; private key
+# material never belongs in the repository.
+/secrets/

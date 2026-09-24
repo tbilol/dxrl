@@ -88,7 +88,6 @@ services/identity/
 │   ├── repository/postgres/ pgx v5 repository, outbox store, integration tests
 │   └── service/             use cases, verification flow, background worker
 ├── migrations/              goose SQL migrations (embedded)
-├── gen-go.mod.tmpl          written to back/gen/go/go.mod by `make gen`
 ├── Dockerfile               multi-stage, context back/, distroless nonroot
 ├── Dockerfile.dockerignore  keeps the context to gen/go + services/identity
 ├── compose.yaml             identity + identity-migrate on top of deploy/docker-compose.yml
@@ -146,10 +145,13 @@ make gen     # downloads buf 1.73.0 to ~/.cache/agrogram/bin (sha256-checked),
              # runs `buf generate` in back/ and writes back/gen/go/go.mod
 ```
 
-`back/gen/` is git-ignored. Known wrinkle: `buf.gen.yaml` has `clean: true`,
-so `make proto-gen` in `back/` deletes `gen/go/go.mod`; run `make gen` here
-again afterwards. (When the second Go service lands, the go.mod step belongs
-in the shared tooling in `back/`.) `export BUF_TOKEN=...` avoids anonymous BSR
+`make gen` is a thin call into the shared tooling, `back/tools/codegen.sh`:
+the pinned buf version, the download-and-verify logic and the `gen/go/go.mod`
+template live there once, for every service. `make proto-gen-local` in `back/`
+runs the same script, and `make proto-gen` (the Docker path) now writes
+`gen/go/go.mod` too, so neither leaves the Go module missing — `buf.gen.yaml`
+has `clean: true`, which is why it has to be rewritten on every run.
+`back/gen/` is git-ignored. `export BUF_TOKEN=...` avoids anonymous BSR
 rate limits.
 
 ### 2. Settings and migrations (host)

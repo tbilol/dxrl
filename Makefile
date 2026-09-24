@@ -3,12 +3,18 @@
 # proto-* targets run buf from the official bufbuild/buf Docker image, so the
 # only host requirement is Docker (plus network access to buf.build for deps and
 # remote plugins). No local protoc, buf or protoc-gen-* plugins.
+# proto-gen-local is the Docker-free alternative to proto-gen: it runs the same
+# pinned buf as the services' `make gen`, through tools/codegen.sh.
 # infra-* targets run the local stack in deploy/ with Docker Compose (see
 # deploy/README.md).
 
-BUF_VERSION ?= 1.73.0
-BUF_IMAGE   ?= bufbuild/buf:$(BUF_VERSION)
-DOCKER      ?= docker
+# Shared codegen tooling (one pinned BUF_VERSION, one download+verify script,
+# one gen/go/go.mod template) for this Makefile and every service Makefile.
+BACK_DIR := .
+include $(BACK_DIR)/tools/codegen.mk
+
+BUF_IMAGE ?= bufbuild/buf:$(BUF_VERSION)
+DOCKER    ?= docker
 
 # Git ref the breaking-change check compares against. Needs the contracts to be
 # committed on that branch first.
@@ -17,7 +23,8 @@ BREAKING_AGAINST ?= .git\#branch=main
 # Run as the host user so generated files are not root-owned; keep buf's module
 # and plugin cache inside the repo (git-ignored) so it survives between runs.
 # Export BUF_TOKEN to authenticate against the BSR (higher rate limits).
-BUF := $(DOCKER) run --rm \
+# Named BUF_DOCKER, not BUF: BUF is the shared tooling's "path to a buf binary".
+BUF_DOCKER := $(DOCKER) run --rm \
 	--volume "$(CURDIR):/workspace" \
 	--workdir /workspace \
 	--user "$$(id -u):$$(id -g)" \
@@ -35,34 +42,38 @@ INFRA_COMPOSE  := $(DOCKER) compose --file deploy/docker-compose.yml --env-file 
 .DEFAULT_GOAL := help
 
 .PHONY: help proto proto-deps proto-build proto-lint proto-format proto-format-check \
-	proto-breaking proto-gen proto-clean \
+	proto-breaking proto-gen proto-gen-local proto-clean \
 	infra-env-check infra-up infra-down infra-ps infra-logs
 
 help: ## List targets
-	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-20s %s\n", $$1, $$2}'
+	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-20s %s\n", $$1, $$2}'
 
 proto: proto-format-check proto-lint proto-gen ## Format check, lint, then generate code
 
 proto-deps: ## Resolve deps and update buf.lock
-	$(BUF) dep update
+	$(BUF_DOCKER) dep update
 
 proto-build: ## Compile all contracts (fast syntax/type check)
-	$(BUF) build
+	$(BUF_DOCKER) build
 
 proto-lint: ## Lint contracts (style + protovalidate rules)
-	$(BUF) lint
+	$(BUF_DOCKER) lint
 
 proto-format: ## Rewrite .proto files in canonical format
-	$(BUF) format --write
+	$(BUF_DOCKER) format --write
 
 proto-format-check: ## Fail if any .proto file is not canonically formatted
-	$(BUF) format --diff --exit-code
+	$(BUF_DOCKER) format --diff --exit-code
 
 proto-breaking: ## Detect breaking changes against BREAKING_AGAINST
-	$(BUF) breaking --against '$(BREAKING_AGAINST)'
+	$(BUF_DOCKER) breaking --against '$(BREAKING_AGAINST)'
 
-proto-gen: ## Generate Go, Python and Java code into gen/
-	$(BUF) generate
+proto-gen: ## Generate Go, Python and Java code into gen/ (Docker)
+	$(BUF_DOCKER) generate
+	$(CODEGEN) go-mod
+
+proto-gen-local: ## Same, without Docker: pinned buf binary from tools/codegen.sh
+	$(CODEGEN) generate
 
 proto-clean: ## Remove generated code
 	rm -rf gen

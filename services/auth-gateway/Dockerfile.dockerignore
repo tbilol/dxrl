@@ -1,0 +1,16 @@
+# BuildKit reads <Dockerfile>.dockerignore next to the Dockerfile instead of
+# back/.dockerignore. The context is back/, but auth-gateway only needs the
+# generated Go code and its own directory: everything else (the legacy
+# prototype in _legacy/, gen/python, gen/java, proto/, deploy/, .git, other
+# services, local .env files) stays out of the build context.
+*
+!gen/go/
+!services/auth-gateway/
+
+**/.env
+**/.env.*
+# Signing keys are mounted at run time, never copied into an image.
+services/auth-gateway/secrets/
+services/auth-gateway/bin/
+services/auth-gateway/*.test
+services/auth-gateway/coverage.*

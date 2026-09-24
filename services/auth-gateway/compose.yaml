@@ -1,0 +1,101 @@
+# auth-gateway on top of the local infrastructure stack and identity.
+#
+# auth-gateway calls identity, so THREE files are layered, in this order:
+# back/deploy/docker-compose.yml (postgres, redis, kafka, kafka-init and the
+# `agrogram` network), back/services/identity/compose.yaml (identity, which
+# this file's `depends_on` waits for) and this one. From the directory that
+# contains back/:
+#
+#   docker compose -f back/deploy/docker-compose.yml \
+#     -f back/services/identity/compose.yaml \
+#     -f back/services/auth-gateway/compose.yaml \
+#     up -d --build --wait auth-gateway
+#
+# (or `make compose-up` in back/services/auth-gateway). With several -f files,
+# Compose resolves relative paths against the FIRST file's directory
+# (back/deploy/) and reads back/deploy/.env for interpolation; hence the build
+# context `..` (= back/), the bind mount `../services/auth-gateway/secrets` and
+# the passwords from AUTH_GATEWAY_DB_PASSWORD and REDIS_PASSWORD, which that
+# .env already defines.
+#
+# Needs `make gen` (the image compiles against back/gen/go) and `make dev-key`
+# (the signing key is mounted, never baked in) in back/services/auth-gateway
+# beforehand.
+
+x-auth-gateway-image: &auth-gateway-image
+  image: agrogram/auth-gateway:dev
+  build:
+    context: ..
+    dockerfile: services/auth-gateway/Dockerfile
+
+x-auth-gateway-env: &auth-gateway-env
+  # In-network addresses; passwords come from back/deploy/.env.
+  AUTH_GATEWAY_DATABASE_URL: postgres://auth_gateway:${AUTH_GATEWAY_DB_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}@postgres:5432/auth_gateway?sslmode=disable
+  AUTH_GATEWAY_REDIS_URL: redis://:${REDIS_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}@redis:6379/0
+  AUTH_GATEWAY_KAFKA_BROKERS: kafka:9092
+  AUTH_GATEWAY_IDENTITY_ADDR: identity:50051
+  # Mounted read-only from services/auth-gateway/secrets (see `make dev-key`).
+  AUTH_GATEWAY_JWT_PRIVATE_KEY_FILE: /run/secrets/jwt-es256.pem
+  AUTH_GATEWAY_JWT_ISSUER: ${AUTH_GATEWAY_JWT_ISSUER:-https://auth.agrogram.local}
+  AUTH_GATEWAY_JWT_AUDIENCE: ${AUTH_GATEWAY_JWT_AUDIENCE:-agrogram-api}
+  AUTH_GATEWAY_GRPC_ADDR: ":50051"
+  AUTH_GATEWAY_HTTP_ADDR: ":8081"
+  AUTH_GATEWAY_LOG_FORMAT: json
+  AUTH_GATEWAY_LOG_LEVEL: ${AUTH_GATEWAY_LOG_LEVEL:-info}
+  # Local stack only: lets grpcurl discover the API. Keep it off elsewhere.
+  AUTH_GATEWAY_GRPC_REFLECTION: ${AUTH_GATEWAY_GRPC_REFLECTION:-true}
+  # STUB, local stack only: a fixed SMS code, because nothing is ever sent.
+  AUTH_GATEWAY_DEV_PHONE_CODE: ${AUTH_GATEWAY_DEV_PHONE_CODE:-123456}
+  AUTH_GATEWAY_DEV_LOG_PHONE_CODES: ${AUTH_GATEWAY_DEV_LOG_PHONE_CODES:-false}
+
+services:
+  # One-shot: applies the migrations, then exits 0; auth-gateway waits for it.
+  auth-gateway-migrate:
+    <<: *auth-gateway-image
+    command: ["migrate", "up"]
+    restart: "no"
+    environment: *auth-gateway-env
+    networks: [agrogram]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The image HEALTHCHECK probes the HTTP server, which `migrate` never starts.
+    healthcheck:
+      disable: true
+
+  auth-gateway:
+    <<: *auth-gateway-image
+    restart: unless-stopped
+    environment: *auth-gateway-env
+    networks: [agrogram]
+    volumes:
+      # `make dev-key` writes secrets/jwt-es256.pem; it stays outside the image.
+      - ../services/auth-gateway/secrets:/run/secrets:ro
+    depends_on:
+      auth-gateway-migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      identity:
+        condition: service_healthy
+    ports:
+      # gRPC and health on the host, loopback only (identity uses 15051/18051).
+      - "127.0.0.1:${AUTH_GATEWAY_GRPC_PORT:-15052}:50051"
+      - "127.0.0.1:${AUTH_GATEWAY_HTTP_PORT:-18052}:8081"
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "/auth-gateway", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+      start_interval: 2s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
