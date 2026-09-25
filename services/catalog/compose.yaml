@@ -1,0 +1,90 @@
+# catalog on top of the local infrastructure stack.
+#
+# Always used together with back/deploy/docker-compose.yml, which defines
+# postgres, redis, kafka, kafka-init and the `agrogram` network. From the
+# directory that contains back/:
+#
+#   docker compose -f back/deploy/docker-compose.yml -f back/services/catalog/compose.yaml \
+#     up -d --build --wait catalog
+#
+# (or `make compose-up` in back/services/catalog). With several -f files,
+# Compose resolves relative paths against the FIRST file's directory
+# (back/deploy/) and reads back/deploy/.env for interpolation; hence the build
+# context `..` (= back/) and the passwords from CATALOG_DB_PASSWORD and
+# REDIS_PASSWORD, which that .env already defines.
+#
+# catalog calls no other service and consumes no stream: it only publishes
+# the listing stream (agrogram.catalog.listing.v1) through its outbox. It
+# therefore depends on no other service container; profile-social reaches it
+# at catalog:50051, and order-escrow will (Phase 3). To run it with identity,
+# auth-gateway and profile-social, add their compose files too (README.md).
+#
+# Needs `make gen` in back/services/catalog beforehand (the image compiles
+# against back/gen/go).
+
+x-catalog-image: &catalog-image
+  image: agrogram/catalog:dev
+  build:
+    context: ..
+    dockerfile: services/catalog/Dockerfile
+
+x-catalog-env: &catalog-env
+  # In-network addresses; passwords come from back/deploy/.env.
+  CATALOG_DATABASE_URL: postgres://catalog:${CATALOG_DB_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}@postgres:5432/catalog?sslmode=disable
+  CATALOG_REDIS_URL: redis://:${REDIS_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}@redis:6379/0
+  CATALOG_KAFKA_BROKERS: kafka:9092
+  CATALOG_GRPC_ADDR: ":50051"
+  CATALOG_HTTP_ADDR: ":8081"
+  CATALOG_LOG_FORMAT: json
+  CATALOG_LOG_LEVEL: ${CATALOG_LOG_LEVEL:-info}
+  # Local stack only: lets grpcurl discover the API. Keep it off elsewhere.
+  CATALOG_GRPC_REFLECTION: ${CATALOG_GRPC_REFLECTION:-true}
+
+services:
+  # One-shot: applies the migrations (schema and product seed), then exits 0;
+  # catalog waits for it.
+  catalog-migrate:
+    <<: *catalog-image
+    command: ["migrate", "up"]
+    restart: "no"
+    environment: *catalog-env
+    networks: [agrogram]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The image HEALTHCHECK probes the HTTP server, which `migrate` never starts.
+    healthcheck:
+      disable: true
+
+  catalog:
+    <<: *catalog-image
+    restart: unless-stopped
+    environment: *catalog-env
+    networks: [agrogram]
+    depends_on:
+      catalog-migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    ports:
+      # gRPC and health on the host, loopback only (identity uses 15051/18051,
+      # auth-gateway 15052/18052, profile-social 15053/18053).
+      - "127.0.0.1:${CATALOG_GRPC_PORT:-15054}:50051"
+      - "127.0.0.1:${CATALOG_HTTP_PORT:-18054}:8081"
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "/catalog", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+      start_interval: 2s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
