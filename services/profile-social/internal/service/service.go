@@ -1,6 +1,7 @@
 // Package service is profile-social's business logic: profiles, follows,
-// ratings, the account projection fed by identity's account stream, and a
-// user's listings (read from catalog).
+// ratings (unlocked by the completed transactions of order-escrow's
+// transaction stream), the account projection fed by identity's account
+// stream, and a user's listings (read from catalog).
 package service
 
 import (

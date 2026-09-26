@@ -24,15 +24,20 @@ type Config struct {
 	// Empty disables the follow rate limit (with a warning at startup).
 	RedisURL string `env:"REDIS_URL"`
 
-	// Empty disables the account-stream consumer and the outbox relay (with a
-	// warning): no account updates are applied and events accumulate in the
-	// outbox table.
+	// Empty disables the stream consumer and the outbox relay (with a
+	// warning): no account updates are applied, no completed transactions are
+	// recorded (RateUser stays RATING_NOT_ALLOWED) and events accumulate in
+	// the outbox table. The consumer group reads both consumed streams,
+	// identity's account stream and order-escrow's transaction stream, and is
+	// also DeadLetter.consumer_group.
 	KafkaBrokers       []string `env:"KAFKA_BROKERS" envSeparator:","`
 	KafkaClientID      string   `env:"KAFKA_CLIENT_ID" envDefault:"profile-social"`
 	KafkaConsumerGroup string   `env:"KAFKA_CONSUMER_GROUP" envDefault:"profilesocial"`
 
-	// catalog gRPC address for ListUserListings. Empty: an empty page (with a
-	// warning). TODO(catalog): catalog is not built yet.
+	// catalog gRPC address for ListUserListings; the connection is lazy.
+	// catalog's local binary or container listens on 127.0.0.1:15054
+	// (.env.example), catalog:50051 in compose (compose.yaml). Empty, or
+	// catalog unreachable: an empty page (with a warning).
 	CatalogAddr    string        `env:"CATALOG_ADDR"`
 	CatalogTimeout time.Duration `env:"CATALOG_TIMEOUT" envDefault:"2s"`
 

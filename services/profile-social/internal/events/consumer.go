@@ -85,7 +85,7 @@ type ConsumerConfig struct {
 //
 // Delivery is at-least-once: a record's offset is committed only after it
 // was processed or dead-lettered, after each poll batch. Handlers must be
-// idempotent (the account handler de-duplicates on event_id). A rebalance or
+// idempotent (both handlers de-duplicate on event_id). A rebalance or
 // a crash between processing and the commit delivers records again.
 //
 // Failures:

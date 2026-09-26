@@ -8,10 +8,9 @@
 // catalog applies its own visibility rules as well. Each call has its own
 // short timeout.
 //
-// TODO(catalog): catalog is not built yet. Until it runs, the address is
-// empty (the service answers empty pages) or the calls fail with UNAVAILABLE,
-// which this package reports as domain.ErrDependencyUnavailable so that the
-// service degrades to an empty page.
+// The connection is lazy. While catalog is not running, unreachable or too
+// slow, the calls fail with an error that wraps
+// domain.ErrDependencyUnavailable, and the service degrades to an empty page.
 package catalogclient
 
 import (
@@ -144,10 +143,11 @@ func (c *Client) call(ctx context.Context, p auth.Principal) (context.Context, c
 
 // wrap turns a failed catalog call into profile-social's error model. When
 // catalog cannot answer (UNAVAILABLE, including connection refused and name
-// resolution failures, DEADLINE_EXCEEDED, UNIMPLEMENTED while it is a stub,
-// or a transport error) the error is DEPENDENCY_UNAVAILABLE and wraps
-// domain.ErrDependencyUnavailable; the service degrades on it. catalog's own
-// errors (a bad page token, permission denied) keep their code.
+// resolution failures, DEADLINE_EXCEEDED, UNIMPLEMENTED from a catalog
+// without the method, or a transport error) the error is
+// DEPENDENCY_UNAVAILABLE and wraps domain.ErrDependencyUnavailable; the
+// service degrades on it. catalog's own errors (a bad page token, permission
+// denied) keep their code.
 func wrap(method string, err error) error {
 	st, ok := status.FromError(err)
 	if !ok || errors.Is(err, context.DeadlineExceeded) {

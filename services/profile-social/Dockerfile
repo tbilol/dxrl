@@ -10,8 +10,8 @@
 #   cd back && docker build -f services/profile-social/Dockerfile -t agrogram/profile-social:dev .
 #
 # The image runs `serve` by default (gRPC, HTTP health, outbox relay and the
-# account-stream consumer); `migrate up|down|status` and `healthcheck` are
-# subcommands of the same binary (distroless has no shell).
+# account/transaction-stream consumer); `migrate up|down|status` and
+# `healthcheck` are subcommands of the same binary (distroless has no shell).
 
 FROM golang:1.27-alpine AS build
 WORKDIR /src

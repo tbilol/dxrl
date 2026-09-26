@@ -91,9 +91,9 @@ var _ service.Queries = (*queries)(nil)
 // of the data being written, worth retrying for as long as it lasts: the
 // database is unreachable, restarting, overloaded or too slow, rejects the
 // credentials, does not exist, or has no (or an older) schema (`migrate up`
-// not run), or the transaction lost a serialization race. The account-stream
+// not run), or the transaction lost a serialization race. The stream
 // consumer retries such failures without spending its retry budget, so an
-// outage or a deployment mistake never dead-letters the stream. Errors about
+// outage or a deployment mistake never dead-letters a stream. Errors about
 // the record's data (classes 22 and 23) are not transient.
 func IsTransient(err error) bool {
 	if err == nil {

@@ -77,10 +77,10 @@ func serve(ctx context.Context) error {
 		log.Warn("PROFILE_SOCIAL_REDIS_URL is empty: follow rate limiting is disabled")
 	}
 
-	// catalog (optional): ListUserListings. The connection is lazy.
-	// STUB: catalog is not built yet; without an address (or while catalog is
-	// unreachable) ListUserListings answers empty pages. TODO(catalog): set
-	// PROFILE_SOCIAL_CATALOG_ADDR once catalog runs.
+	// catalog (optional): ListUserListings. The connection is lazy, so catalog
+	// may start after profile-social or restart; without an address, or while
+	// catalog is unreachable, ListUserListings answers empty pages (with a
+	// warning).
 	var listings service.ListingSource
 	if cfg.CatalogAddr != "" {
 		catalog, err := catalogclient.Dial(cfg.CatalogAddr, cfg.CatalogTimeout)
@@ -100,17 +100,17 @@ func serve(ctx context.Context) error {
 		return fmt.Errorf("protovalidate: %w", err)
 	}
 
-	// Kafka (optional): the outbox relay and the account-stream consumer.
-	// The producer also publishes dead letters; the consumer is a separate
-	// group client that commits offsets itself.
+	// Kafka (optional): the outbox relay and the stream consumer. One group
+	// client reads both consumed streams: identity's account stream (the
+	// account projection) and order-escrow's transaction stream (completed
+	// transactions unlock ratings and count deals). The producer also
+	// publishes dead letters; the consumer commits offsets itself.
 	var (
 		producer *kgo.Client
 		consumer *kgo.Client
 		handlers = map[string]events.RecordHandler{
-			events.TopicAccount: events.NewAccountHandler(svc, validator, log),
-			// TODO(phase3): subscribe order-escrow's transaction stream once it
-			// exists, so completed transactions unlock ratings and count deals:
-			//   events.TopicTransaction: events.NewTransactionHandler(svc, validator, log),
+			events.TopicAccount:     events.NewAccountHandler(svc, validator, log),
+			events.TopicTransaction: events.NewTransactionHandler(svc, validator, log),
 		}
 	)
 	if len(cfg.KafkaBrokers) > 0 {
@@ -128,8 +128,11 @@ func serve(ctx context.Context) error {
 			kgo.ConsumerGroup(cfg.KafkaConsumerGroup),
 			kgo.ConsumeTopics(slices.Sorted(maps.Keys(handlers))...),
 			kgo.DisableAutoCommit(), // offsets are committed after processing (events.Consumer)
-			// A new group starts at the beginning of the stream, so profiles
-			// catch up with every account identity ever published.
+			// A new group starts at the beginning of the streams, so profiles
+			// catch up with every account identity ever published. A topic
+			// newly added to an existing group has no committed offsets
+			// either, so it too starts at the beginning: that backfills every
+			// completed transaction order-escrow has already published.
 			kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 		)
 		if err != nil {
@@ -137,8 +140,9 @@ func serve(ctx context.Context) error {
 			return fmt.Errorf("kafka consumer: %w", err)
 		}
 	} else {
-		log.Warn("PROFILE_SOCIAL_KAFKA_BROKERS is empty: the account-stream consumer and the outbox relay are disabled; " +
-			"badges will not update and events stay in the outbox table")
+		log.Warn("PROFILE_SOCIAL_KAFKA_BROKERS is empty: the stream consumer and the outbox relay are disabled; " +
+			"badges will not update, no completed transaction is recorded (RateUser answers RATING_NOT_ALLOWED) " +
+			"and events stay in the outbox table")
 	}
 
 	grpcHealth := grpchealth.NewServer()
@@ -176,7 +180,7 @@ func serve(ctx context.Context) error {
 			Retention:  cfg.OutboxRetention,
 		}, log)
 		bg.Go(func() { relay.Run(bgCtx) })
-		accounts := events.NewConsumer(consumer, producer, handlers, store, events.ConsumerConfig{
+		streams := events.NewConsumer(consumer, producer, handlers, store, events.ConsumerConfig{
 			Group:          cfg.KafkaConsumerGroup,
 			MaxAttempts:    cfg.ConsumerMaxAttempts,
 			RetryBackoff:   cfg.ConsumerRetryBackoff,
@@ -186,7 +190,7 @@ func serve(ctx context.Context) error {
 			Transient:      postgres.IsTransient,
 			InboxRetention: cfg.InboxRetention,
 		}, log)
-		bg.Go(func() { accounts.Run(bgCtx) })
+		bg.Go(func() { streams.Run(bgCtx) })
 	}
 
 	errc := make(chan error, 2)

@@ -1,12 +1,29 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
+// clearEnv unsets every PROFILE_SOCIAL_* variable for the rest of the test,
+// so the defaults are checked even when the caller's environment sets some
+// (make test-integration loads ./.env for every package).
+func clearEnv(t *testing.T) {
+	t.Helper()
+	for _, kv := range os.Environ() {
+		if name, _, _ := strings.Cut(kv, "="); strings.HasPrefix(name, Prefix) {
+			t.Setenv(name, "") // restores the original value after the test
+			if err := os.Unsetenv(name); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
 func TestLoadDefaults(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("PROFILE_SOCIAL_DATABASE_URL", "postgres://profile_social:x@localhost:5432/profile_social")
 	t.Setenv("PROFILE_SOCIAL_KAFKA_BROKERS", "a:9092,b:9092")
 	cfg, err := Load()

@@ -22,11 +22,13 @@ import (
 // per transaction and rater. The rating, the rated user's aggregate (sum,
 // count, version) and RatingUpdated in the outbox commit together.
 //
-// Eligibility comes from completed_transactions, filled from order-escrow's
-// transaction stream: TODO(phase3), until then there are no rows and every
-// call is RATING_NOT_ALLOWED. Errors: RATING_NOT_ALLOWED (no completed
-// transaction with that id that the caller is a party of), ALREADY_RATED. A
-// retry with the same request id returns the original rating.
+// Eligibility comes from completed_transactions, which the consumer of
+// order-escrow's transaction stream fills when a transaction reaches
+// COMPLETED (PayoutReleased; see RecordCompletedTransaction). Errors:
+// RATING_NOT_ALLOWED (no completed transaction with that id that the caller
+// is a party of, which includes one whose PayoutReleased has not been
+// consumed yet), ALREADY_RATED. A retry with the same request id returns the
+// original rating.
 //
 // RatingUpdated needs a profile snapshot with a display name, so it is
 // published only when the rated user's profile is ACTIVE; the rating and the
@@ -175,23 +177,57 @@ func (s *Service) ListRatings(ctx context.Context, _ auth.Principal, userID stri
 	return out, nil
 }
 
-// RecordCompletedTransaction records a completed escrow transaction: it
-// unlocks one rating per party and adds one to both parties' deals_count,
-// once per transaction id (a replay changes nothing and returns false).
+// RecordCompletedTransaction records a completed escrow transaction from one
+// COMPLETED event of order-escrow's transaction stream (the caller is
+// events.TransactionHandler; PayoutReleased is the first such event): it
+// unlocks one rating per party and adds one to both parties' deals_count.
+// Following the consumer rules of metadata.proto:
 //
-// TODO(phase3): the caller is events.TransactionHandler, the consumer of
-// agrogram.orderescrow.transaction.v1 (PayoutReleased: state COMPLETED),
-// which is not subscribed until order-escrow exists.
-func (s *Service) RecordCompletedTransaction(ctx context.Context, t domain.CompletedTransaction) (bool, error) {
-	if t.ID == uuid.Nil || t.FarmerID == uuid.Nil || t.ResellerID == uuid.Nil || t.FarmerID == t.ResellerID {
-		return false, fmt.Errorf("record completed transaction %s: needs an id and two distinct parties", t.ID)
+//   - de-duplication: the event id goes into the inbox (processed_events) in
+//     the same transaction; a known id is a Duplicate and changes nothing;
+//   - once per transaction id: the first COMPLETED event records the
+//     transaction (Applied); any other one, such as the BonusAwarded that
+//     follows PayoutReleased, finds it recorded and is Stale.
+//
+// deals_count therefore grows once per transaction id, which is stricter
+// than metadata.proto's rule of reacting to a fact once per event_id:
+// PayoutReleased and BonusAwarded both carry a COMPLETED snapshot, and
+// counting per event would count the deal twice. No version guard is needed:
+// COMPLETED is final and recording is monotonic (the row is only ever
+// inserted), so a late or replayed earlier event can never undo it, and
+// events before COMPLETED never get here.
+func (s *Service) RecordCompletedTransaction(ctx context.Context, u domain.TransactionUpdate) (domain.ApplyOutcome, error) {
+	t := u.Transaction
+	if u.EventID == uuid.Nil || t.ID == uuid.Nil || t.FarmerID == uuid.Nil || t.ResellerID == uuid.Nil ||
+		t.FarmerID == t.ResellerID {
+		return 0, fmt.Errorf("record completed transaction %s: needs an event id, a transaction id and two distinct parties",
+			t.ID)
 	}
-	var recorded bool
+	var outcome domain.ApplyOutcome
 	err := s.store.InTx(ctx, func(q Queries) error {
 		now := s.clock()
-		var err error
-		if recorded, err = q.InsertCompletedTransaction(ctx, t, now); err != nil || !recorded {
+		fresh, err := q.MarkProcessed(ctx, domain.ProcessedEvent{
+			EventID:          u.EventID,
+			Topic:            u.Topic,
+			EventType:        u.EventType,
+			AggregateID:      t.ID,
+			AggregateVersion: u.Version,
+			ProcessedAt:      now,
+		})
+		if err != nil {
 			return err
+		}
+		if !fresh {
+			outcome = domain.Duplicate
+			return nil
+		}
+		recorded, err := q.InsertCompletedTransaction(ctx, t, now)
+		if err != nil {
+			return err
+		}
+		if !recorded {
+			outcome = domain.Stale
+			return nil
 		}
 		for _, id := range []uuid.UUID{t.FarmerID, t.ResellerID} {
 			if err := q.EnsureProfile(ctx, id, now); err != nil {
@@ -201,16 +237,20 @@ func (s *Service) RecordCompletedTransaction(ctx context.Context, t domain.Compl
 		if _, err := q.LockProfiles(ctx, t.FarmerID, t.ResellerID); err != nil {
 			return err
 		}
-		return q.AddDeal(ctx, t.FarmerID, t.ResellerID)
+		if err := q.AddDeal(ctx, t.FarmerID, t.ResellerID); err != nil {
+			return err
+		}
+		outcome = domain.Applied
+		return nil
 	})
 	if err != nil {
-		return false, fmt.Errorf("record completed transaction %s: %w", t.ID, err)
+		return 0, fmt.Errorf("record completed transaction %s: %w", t.ID, err)
 	}
-	if recorded {
+	if outcome == domain.Applied {
 		s.log.InfoContext(ctx, "completed transaction recorded", "transaction_id", t.ID,
-			"farmer_id", t.FarmerID, "reseller_id", t.ResellerID)
+			"farmer_id", t.FarmerID, "reseller_id", t.ResellerID, "event_type", u.EventType, "version", u.Version)
 	}
-	return recorded, nil
+	return outcome, nil
 }
 
 // enqueueProfileEvent writes one ProfileEvent to the outbox through q, so it

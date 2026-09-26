@@ -7,13 +7,15 @@
 //   - agrogram.profilesocial.profile.v1: ProfileEvent (profile.proto), keyed
 //     by the user id. Today the only case is RatingUpdated.
 //
-// Consumed (Consumer, consumer group "profilesocial" by default):
+// Consumed (Consumer, one consumer group for both streams, "profilesocial" by
+// default):
 //
 //   - agrogram.identity.account.v1: AccountEvent (account.proto), applied to
 //     the account projection on profiles by AccountHandler.
-//   - agrogram.orderescrow.transaction.v1: TransactionEvent. TODO(phase3):
-//     TransactionHandler exists but nothing subscribes it until order-escrow
-//     publishes the stream.
+//   - agrogram.orderescrow.transaction.v1: TransactionEvent
+//     (transaction.proto). TransactionHandler records a transaction once its
+//     snapshot is COMPLETED (PayoutReleased), which unlocks RateUser for both
+//     parties and counts one deal for each; earlier states are skipped.
 //
 // Records that cannot be processed are published as DeadLetter to
 // agrogram.profilesocial.deadletter.v1 (metadata.proto).

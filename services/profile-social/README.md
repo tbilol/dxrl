@@ -7,9 +7,11 @@ ratings**, and serves a user's own listings (read from catalog). Contract:
 metadata, validation, events) are in [back/README.md](../../README.md).
 
 Profiles exist and stay in sync through identity's account stream
-(`agrogram.identity.account.v1`), which profile-social consumes; ratings are
-published on the profile stream (`agrogram.profilesocial.profile.v1`) through
-a transactional outbox.
+(`agrogram.identity.account.v1`), which profile-social consumes; completed
+escrow transactions arrive on order-escrow's transaction stream
+(`agrogram.orderescrow.transaction.v1`), which it consumes too, and unlock
+ratings; ratings are published on the profile stream
+(`agrogram.profilesocial.profile.v1`) through a transactional outbox.
 
 | RPC | Who may call | What it does | Errors |
 | --- | --- | --- | --- |
@@ -20,7 +22,7 @@ a transactional outbox.
 | `FollowUser` | a signed-in user with an ACTIVE profile | Adds the edge; follower/following counters + 1 in the same transaction, only when the edge is new (following again is a no-op). Rate-limited per user | SELF_ACTION_NOT_ALLOWED (INVALID_ARGUMENT); NOT_FOUND (target not ACTIVE); FAILED_PRECONDITION (caller has no ACTIVE profile); RATE_LIMITED |
 | `UnfollowUser` | a signed-in user | Removes the edge and lowers both counters; unfollowing a user not followed is a no-op. Rate-limited per user | SELF_ACTION_NOT_ALLOWED; NOT_FOUND; RATE_LIMITED |
 | `ListFollowers` / `ListFollowing` | anyone | ACTIVE profiles, newest follow first; opaque keyset page tokens; `total_size` = the cached counter | NOT_FOUND (user not ACTIVE); INVALID_ARGUMENT (token of another list or user) |
-| `RateUser` | a signed-in party of a completed transaction | Rates the counterparty (score 1-5, comment ≤ 500), once per transaction and rater; the rating, the rated user's aggregate (sum, count, version + 1) and `RatingUpdated` in the outbox commit together. Idempotent on `request_id` | RATING_NOT_ALLOWED (FAILED_PRECONDITION: no such completed transaction, or the caller is not a party); ALREADY_RATED |
+| `RateUser` | a signed-in party of a completed transaction | Rates the counterparty (score 1-5, comment ≤ 500), once per transaction and rater; the rating, the rated user's aggregate (sum, count, version + 1) and `RatingUpdated` in the outbox commit together. Idempotent on `request_id` | RATING_NOT_ALLOWED (FAILED_PRECONDITION: no such completed transaction, including one whose `PayoutReleased` has not been consumed yet, or the caller is not a party); ALREADY_RATED |
 | `ListRatings` | anyone | Ratings received, newest first, plus `summary` (average, count) | NOT_FOUND (user not ACTIVE) |
 | `ListUserListings` | anyone for ACTIVE listings of a user with an ACTIVE profile; the owner for any status | Calls catalog `ListListings` with an owner filter and maps each listing to a `ListingCard`; catalog's page token passes through | PERMISSION_DENIED (non-owner asks for a status other than ACTIVE); NOT_FOUND; an unreachable catalog is an empty page, not an error |
 
@@ -32,9 +34,10 @@ the contract cannot express (a display name of blanks).
 
 Callers reach profile-social through the edge (api-gateway), which checks the
 access token with auth-gateway (`VerifyToken`) and forwards the user as
-`x-agrogram-*` metadata. profile-social never calls identity or
-auth-gateway: accounts arrive on the account stream, so there is no identity
-or auth-gateway address in its configuration.
+`x-agrogram-*` metadata. profile-social never calls identity, auth-gateway
+or order-escrow: accounts arrive on the account stream and completed
+transactions on the transaction stream, so none of their addresses is in its
+configuration. The only service it calls is catalog, for `ListUserListings`.
 
 ## Profile life cycle
 
@@ -66,7 +69,7 @@ and a projection of the account (roles, `is_verified_farmer`, `is_premium`,
 | | |
 | --- | --- |
 | Topic | `agrogram.identity.account.v1` (`AccountEvent`, [`events/v1/account.proto`](../../proto/events/v1/account.proto)), key = user id |
-| Consumer group | `profilesocial` (`PROFILE_SOCIAL_KAFKA_CONSUMER_GROUP`); a new group starts at the beginning of the topic |
+| Consumer group | `profilesocial` (`PROFILE_SOCIAL_KAFKA_CONSUMER_GROUP`), shared with the transaction stream (one client reads both topics); a new group starts at the beginning of the topic |
 | Dead letters | `agrogram.profilesocial.deadletter.v1` (`DeadLetter`, [`events/v1/metadata.proto`](../../proto/events/v1/metadata.proto)), key = original key, `consumer_group` = the group |
 
 Processing follows the consumer rules of `metadata.proto`:
@@ -101,6 +104,50 @@ Processing follows the consumer rules of `metadata.proto`:
   rebalance or a crash between processing and the commit only redelivers
   records, which the inbox absorbs.
 
+### Consumed: order-escrow's transaction stream
+
+| | |
+| --- | --- |
+| Topic | `agrogram.orderescrow.transaction.v1` (`TransactionEvent`, [`events/v1/transaction.proto`](../../proto/events/v1/transaction.proto)), key = transaction id |
+| Consumer group | the account stream's (`profilesocial`): one client, one group, both topics |
+| Dead letters | `agrogram.profilesocial.deadletter.v1`, as for the account stream (`source_topic` = this topic) |
+
+profile-social needs one fact from this stream: that a transaction between a
+farmer and a reseller is complete (`events.TransactionHandler` calls
+`service.RecordCompletedTransaction`).
+
+- **Only COMPLETED snapshots matter.** `TransactionCreated` up to
+  `ReceiptConfirmed` carry earlier states and are skipped without touching
+  the database (no inbox row). `PayoutReleased` moves the snapshot to
+  `TRANSACTION_STATE_COMPLETED`, which is final: it records the transaction
+  in `completed_transactions`, which unlocks one rating per party and adds
+  one to both parties' `deals_count`. `BonusAwarded` (still COMPLETED, the
+  next version) and replays change nothing. Like the account handler it reads
+  the snapshot, not the `oneof`, so an unknown event type is handled like any
+  other; `completed_at` falls back to `metadata.occurred_at`.
+- **Idempotency.** The event id goes into `processed_events` in the same
+  transaction (a known id is a duplicate), and `completed_transactions` is
+  keyed by the transaction id (`ON CONFLICT (id) DO NOTHING`), so a deal
+  counts once per transaction, not once per event. That is stricter than
+  `metadata.proto`'s once-per-`event_id` rule for facts, on purpose: two
+  events carry COMPLETED. No version guard is needed: COMPLETED is final and a
+  recorded transaction is only ever inserted, so a late or replayed event
+  cannot undo it, and since `completed_transactions` is never purged, a replay
+  after the inbox purge counts nothing twice either.
+- **Poison records**: besides the content-type, decoding and protovalidate
+  checks, a record whose `metadata.aggregate_type` is not
+  `RESOURCE_TYPE_TRANSACTION`, or whose snapshot `id` / `version` differs from
+  `metadata.aggregate_id` / `aggregate_version`, is dead-lettered at once,
+  whatever its state. A record key other than the transaction id is only
+  logged (warning).
+- **Outages, other failures and offsets** are handled exactly as for the
+  account stream: it is the same consumer with the same retry budget,
+  backoff and `postgres.IsTransient`.
+- **Backfill.** A topic newly added to an existing group has no committed
+  offsets, so it starts at its beginning like a new group does: the first
+  start with this stream records every transaction order-escrow has already
+  completed (within the topic's retention).
+
 ### Published: the profile stream
 
 Transactional outbox (`outbox` table, written in the state change's
@@ -128,13 +175,11 @@ rating and aggregate but no event (the snapshot requires a display name).
 `completed_transactions` records completed escrow transactions between a
 farmer and a reseller; each unlocks one rating per party and adds one to both
 parties' `deals_count`, once per transaction id
-(`service.RecordCompletedTransaction`). The consumer that calls it is
-`events.TransactionHandler` for order-escrow's
-`agrogram.orderescrow.transaction.v1` (`TransactionEvent`; the snapshot
-reaches `TRANSACTION_STATE_COMPLETED` with `PayoutReleased`). order-escrow is
-Phase 3, so the handler is not subscribed (`TODO(phase3)` in
-`cmd/profile-social/serve.go`): the table stays empty, `RateUser` fails closed
-with RATING_NOT_ALLOWED and `deals_count` stays 0.
+(`service.RecordCompletedTransaction`). Its rows come from order-escrow's
+transaction stream (above): a transaction is recorded when its
+`PayoutReleased` is consumed. Until then `RateUser` on it fails closed with
+RATING_NOT_ALLOWED; without Kafka (`PROFILE_SOCIAL_KAFKA_BROKERS` empty)
+nothing is ever recorded.
 
 ## Layout
 
@@ -144,7 +189,7 @@ services/profile-social/
 ├── internal/
 │   ├── apperr/              Error type -> gRPC status with one common.v1.Error
 │   ├── auth/                x-agrogram-* metadata -> Principal; outgoing metadata for catalog
-│   ├── catalogclient/       gRPC client for catalog ListListings -> ListingCard (TODO(catalog))
+│   ├── catalogclient/       gRPC client for catalog ListListings -> ListingCard (lazy connection)
 │   ├── config/              PROFILE_SOCIAL_* environment variables
 │   ├── domain/              Profile, Account projection, Rating, CompletedTransaction, pages
 │   ├── events/              ProfileEvent + DeadLetter builders, outbox relay, consumer,
@@ -188,10 +233,10 @@ values stop the start-up with one error that lists all of them.
 | `PROFILE_SOCIAL_DATABASE_URL` | **required** | Postgres URL (role and database `profile_social`) |
 | `PROFILE_SOCIAL_DATABASE_MAX_CONNS` | `10` | pgx pool size |
 | `PROFILE_SOCIAL_REDIS_URL` | empty | Redis URL for the follow rate limit (keys `profile-social:ratelimit:*`); empty disables it (warning) |
-| `PROFILE_SOCIAL_KAFKA_BROKERS` | empty | Comma-separated brokers; empty disables the consumer and the relay (warning) |
+| `PROFILE_SOCIAL_KAFKA_BROKERS` | empty | Comma-separated brokers; empty disables the consumer of both streams (no badge updates; `RateUser` stays RATING_NOT_ALLOWED) and the relay (warning) |
 | `PROFILE_SOCIAL_KAFKA_CLIENT_ID` | `profile-social` | Kafka client id |
-| `PROFILE_SOCIAL_KAFKA_CONSUMER_GROUP` | `profilesocial` | Consumer group, also `DeadLetter.consumer_group` |
-| `PROFILE_SOCIAL_CATALOG_ADDR` | empty | catalog gRPC address for ListUserListings; empty answers empty pages (warning). TODO(catalog) |
+| `PROFILE_SOCIAL_KAFKA_CONSUMER_GROUP` | `profilesocial` | Consumer group of both consumed streams (account and transaction), also `DeadLetter.consumer_group` |
+| `PROFILE_SOCIAL_CATALOG_ADDR` | empty | catalog gRPC address for ListUserListings (lazy connection): `127.0.0.1:15054` in `.env.example` (catalog's local binary or container), `catalog:50051` in `compose.yaml`. Empty, or catalog unreachable: an empty page (warning) |
 | `PROFILE_SOCIAL_CATALOG_TIMEOUT` | `2s` | Per-call catalog timeout |
 | `PROFILE_SOCIAL_GRPC_ADDR` | `:50051` | gRPC listen address |
 | `PROFILE_SOCIAL_HTTP_ADDR` | `:8081` | `/healthz`, `/readyz` listen address (also used by `profile-social healthcheck`) |
@@ -239,7 +284,7 @@ cp .env.example .env          # then set the passwords from back/deploy/.env
 make migrate-up               # goose, embedded SQL; also: migrate-status, migrate-down
 ```
 
-### 3. Run locally (with the account-stream consumer)
+### 3. Run locally (with the stream consumer)
 
 ```sh
 make run                      # loads .env; gRPC 127.0.0.1:15053, HTTP 127.0.0.1:18053
@@ -247,9 +292,19 @@ curl -i http://127.0.0.1:18053/readyz
 ```
 
 With `PROFILE_SOCIAL_KAFKA_BROKERS` set, `serve` starts the consumer of
-`agrogram.identity.account.v1` (group `profilesocial`) and the outbox relay
-next to the gRPC server. On first start the group reads the topic from the
-beginning, so every account identity has published gets its PENDING row.
+`agrogram.identity.account.v1` and `agrogram.orderescrow.transaction.v1`
+(one group, `profilesocial`) and the outbox relay next to the gRPC server. On
+first start the group reads both topics from the beginning, so every account
+identity has published gets its PENDING row and every transaction
+order-escrow has completed is recorded; a group that so far read only the
+account stream starts the transaction topic at its beginning the same way.
+`make infra-up` in `back/` creates both topics (the broker does not
+auto-create topics); while the transaction topic is missing the consumer
+keeps reading the account stream and picks the topic up once it exists.
+
+With `PROFILE_SOCIAL_CATALOG_ADDR=127.0.0.1:15054` (`.env.example`),
+`ListUserListings` calls catalog's local binary or container; while catalog
+is not running it answers empty pages (with a warning).
 
 ### 4. Run in Docker Compose (with the infra stack)
 
@@ -259,26 +314,44 @@ make compose-logs
 make compose-down             # removes only the profile-social containers
 ```
 
-### 5. Run alongside identity and auth-gateway
+### 5. Run alongside the other services
 
-profile-social only needs Postgres and Kafka; identity feeds it through the
-account stream. Local binaries, one terminal each:
+profile-social only needs Postgres and Kafka to start. identity feeds it
+through the account stream and order-escrow through the transaction stream;
+it calls catalog for `ListUserListings`. order-escrow calls catalog too
+(`CreateTransaction` snapshots the listing through `GetListing`), so catalog
+must run before transactions can be created. Local binaries, one terminal
+each (each with its `.env`; the `.env.example` files already point
+profile-social and order-escrow at catalog on `127.0.0.1:15054`):
 
 ```sh
 (cd ../identity && make migrate-up && make run)          # 127.0.0.1:15051
 (cd ../auth-gateway && make migrate-up && make run)      # 127.0.0.1:15052 (needs make dev-key once)
+(cd ../catalog && make migrate-up && make run)           # 127.0.0.1:15054
+(cd ../order-escrow && make migrate-up && make run)      # 127.0.0.1:15055 (Java)
 make migrate-up && make run                              # 127.0.0.1:15053
 ```
 
-Or all three in Compose, from the directory that contains `back/`:
+Or all five in Compose, from the directory that contains `back/`
+(profile-social's compose file points at `catalog:50051`; order-escrow's
+too):
 
 ```sh
 docker compose -f back/deploy/docker-compose.yml \
   -f back/services/identity/compose.yaml \
   -f back/services/auth-gateway/compose.yaml \
   -f back/services/profile-social/compose.yaml \
-  up -d --build --wait identity auth-gateway profile-social
+  -f back/services/catalog/compose.yaml \
+  -f back/services/order-escrow/compose.yaml \
+  up -d --build --wait identity auth-gateway profile-social catalog order-escrow
 ```
+
+Leaving out catalog's file keeps everything else working: `ListUserListings`
+answers empty pages. Ratings unlock only once order-escrow publishes
+`PayoutReleased` for a transaction between the two users (the reseller's
+`ConfirmReceipt` completes it; see order-escrow's README for the grpcurl
+walkthrough): profile-social then records the transaction, and each party
+may rate the other once with its id.
 
 ### 6. Tests
 
@@ -293,18 +366,24 @@ The unit tests cover profile create/update/delete, follows (idempotency,
 counters, self-follow, pagination), ratings (eligibility, once per
 transaction, aggregate, outbox), the account projection (duplicates,
 older-after-newer, same-version repeats, unknown oneof case, event before and
-after `CreateProfile`), and the consumer on a kfake cluster (order, commits,
-poison and budget dead letters, outages that are never dead-lettered, a
-shutdown that leaves the record in progress uncommitted). The integration
-tests create a random schema (`profile_social_test_<hex>`), migrate it
-through `search_path`, run the real repository and service (version guard,
-concurrent follows, keyset pages, delete, ratings, outbox), roll the
-migrations back and forward, and drop the schema.
+after `CreateProfile`), completed transactions (decoding, earlier states
+skipped, the `completed_at` fallback, poison metadata; `PayoutReleased`
+applied, its redelivery a duplicate, `BonusAwarded` stale, `deals_count` once;
+`RateUser` unlocked end to end through the transaction handler), and the
+consumer on a kfake cluster (order, commits, poison and budget dead letters,
+outages that are never dead-lettered, a shutdown that leaves the record in
+progress uncommitted, both streams in one group, transaction dead letters).
+The integration tests create a random schema (`profile_social_test_<hex>`),
+migrate it through `search_path`, run the real repository and service
+(version guard, concurrent follows, keyset pages, delete, ratings, the
+completed-transaction inbox and idempotency, outbox, outages that are
+transient), roll the migrations back and forward, and drop the schema.
 
 ### 7. Smoke test with grpcurl
 
 With `PROFILE_SOCIAL_GRPC_REFLECTION=true` and identity + auth-gateway
-running (section 5):
+running (section 5); the rating and listing steps also need order-escrow and
+catalog:
 
 ```sh
 PS=127.0.0.1:15053; AG=127.0.0.1:15052; ID=127.0.0.1:15051
@@ -342,11 +421,19 @@ grpcurl -plaintext -H "x-agrogram-user-id: $OTHER" -d "{\"user_id\":\"$USER_ID\"
 grpcurl -plaintext -d "{\"user_id\":\"$USER_ID\",\"page\":{\"page_size\":10}}" \
   $PS agrogram.profilesocial.v1.ProfileSocialService/ListFollowers
 
-# fails closed until Phase 3 records completed transactions
+# ratings fail closed until a transaction between the two completes
 grpcurl -plaintext -H "x-agrogram-user-id: $OTHER" \
   -d "{\"request_id\":\"$(uuid)\",\"transaction_id\":\"$(uuid)\",\"score\":5}" \
   $PS agrogram.profilesocial.v1.ProfileSocialService/RateUser            # RATING_NOT_ALLOWED
-# empty page until catalog exists (warning in the log)
+# complete one in order-escrow: its README's grpcurl walkthrough with F=$USER_ID (an ACTIVE
+# offer in catalog) and R=$OTHER, up to ConfirmReceipt, which publishes PayoutReleased
+T=<transaction id>
+grpcurl -plaintext -H "x-agrogram-user-id: $OTHER" \
+  -d "{\"request_id\":\"$(uuid)\",\"transaction_id\":\"$T\",\"score\":5,\"comment\":\"Ishonchli\"}" \
+  $PS agrogram.profilesocial.v1.ProfileSocialService/RateUser            # the rating; ALREADY_RATED once more
+grpcurl -plaintext -d "{\"user_id\":\"$USER_ID\"}" \
+  $PS agrogram.profilesocial.v1.ProfileSocialService/ListRatings         # count 1; GetProfile shows deals_count 1
+# the user's listings, from catalog (an empty page, with a warning in the log, while catalog is not running)
 grpcurl -plaintext -d "{\"user_id\":\"$USER_ID\"}" $PS agrogram.profilesocial.v1.ProfileSocialService/ListUserListings
 
 grpcurl -plaintext -d '{"service":"agrogram.profilesocial.v1.ProfileSocialService"}' $PS grpc.health.v1.Health/Check
@@ -358,27 +445,12 @@ consumer group `profilesocial`); dead letters land on
 
 ## Stubs
 
-`// STUB:` marks every stand-in:
-
-| Where | Stands in for |
-| --- | --- |
-| `cmd/profile-social/serve.go` (catalog wiring) | catalog is not built: without `PROFILE_SOCIAL_CATALOG_ADDR` `ListUserListings` answers empty pages |
-| `internal/service/listings.go` (two places) | The empty page answered when catalog is not configured or unreachable |
+`// STUB:` marks every stand-in. profile-social has none left: the empty page
+`ListUserListings` answers while catalog is not configured or unreachable is
+a deliberate fallback, not a stand-in.
 
 ## TODOs
 
-- `TODO(phase3)`: order-escrow's transaction stream.
-  `events.TransactionHandler` (`internal/events/transactions.go`) is ready but
-  not subscribed (`cmd/profile-social/serve.go`); until it is,
-  `completed_transactions` is empty, `RateUser` answers RATING_NOT_ALLOWED and
-  `deals_count` stays 0 (`internal/domain/domain.go`,
-  `internal/grpcserver/handler.go`, `internal/service/ratings.go`,
-  `migrations/00001_init.sql`).
-- `TODO(catalog)`: set `PROFILE_SOCIAL_CATALOG_ADDR` once catalog runs
-  (`.env.example`, `compose.yaml`, `internal/config/config.go`,
-  `cmd/profile-social/serve.go`, `internal/catalogclient/catalogclient.go`);
-  the proto's alternative, a projection of catalog's listing stream, is
-  described in `internal/service/listings.go`.
 - `TODO(media)`: avatars carry only `media_id`; type, status and URLs come
   from media-pipeline (`internal/grpcserver/handler.go`,
   `internal/events/events.go`).
@@ -395,6 +467,18 @@ consumer group `profilesocial`); dead letters land on
   Accounts whose events were deleted by topic retention before profile-social
   first ran get no PENDING row; their badges stay off until their next
   account event (a backfill would need identity to re-publish snapshots).
+- Likewise for the transaction topic: a transaction whose COMPLETED events
+  were deleted by retention before profile-social first read the topic is
+  never recorded, so its parties cannot rate each other and `deals_count`
+  misses it (a backfill would need order-escrow to re-publish).
+- `ListUserListings` calls catalog live, so a profile shows no listings while
+  catalog is down. The proto's service comment has profile-social project
+  catalog's listing stream (`agrogram.catalog.listing.v1`) instead;
+  `internal/service/listings.go` describes how, should the live call become
+  a latency or availability problem.
+- The older migration comments (`migrations/00001_init.sql`, on
+  `deals_count` and `completed_transactions`) still describe the transaction
+  consumer as not built; applied migrations are not edited.
 - A `common.v1.Role` value added to the proto later fails protovalidate
   (`defined_only`) until profile-social is regenerated, so such account
   events would be dead-lettered.

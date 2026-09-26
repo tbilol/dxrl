@@ -197,7 +197,7 @@ func profileProto(p domain.Profile) *profilesocialv1.Profile {
 		Region:           p.Region,
 		District:         p.District,
 		Rating:           &eventsv1.RatingSummary{Average: p.RatingAverage(), Count: p.RatingCount},
-		DealsCount:       p.DealsCount, // TODO(phase3): 0 until completed transactions are consumed
+		DealsCount:       p.DealsCount,
 		FollowerCount:    p.FollowerCount,
 		FollowingCount:   p.FollowingCount,
 		IsVerifiedFarmer: p.Account.IsVerifiedFarmer,

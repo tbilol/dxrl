@@ -65,7 +65,7 @@ tidy: gen-check ## go mod tidy
 build: gen-check ## Build bin/profile-social
 	$(GO) build -trimpath -o $(BIN) ./cmd/profile-social
 
-run: gen-check ## Run the service locally, account-event consumer included (loads ./.env)
+run: gen-check ## Run the service locally, account- and transaction-stream consumer included (loads ./.env)
 	$(LOAD_ENV) $(GO) run ./cmd/profile-social serve
 
 test: gen-check ## Unit tests (no infrastructure needed)

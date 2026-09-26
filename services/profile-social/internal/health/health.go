@@ -2,7 +2,7 @@
 // the standard gRPC health service and HTTP /healthz and /readyz.
 //
 // Readiness depends on Postgres only: Redis failures make rate limiting fail
-// open, and Kafka failures only delay the outbox relay and the account-stream
+// open, and Kafka failures only delay the outbox relay and the stream
 // consumer, so neither stops the service from serving.
 package health
 

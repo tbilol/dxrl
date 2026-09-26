@@ -115,8 +115,9 @@ type Profile struct {
 	FollowingCount int64
 	RatingCount    int64
 	RatingSum      int64
-	// DealsCount counts completed escrow transactions. TODO(phase3): stays 0
-	// until the transaction stream consumer calls RecordCompletedTransaction.
+	// DealsCount counts completed escrow transactions: + 1 for both parties
+	// when order-escrow's transaction stream reports a transaction COMPLETED
+	// (RecordCompletedTransaction), once per transaction id.
 	DealsCount int64
 
 	Account Account
@@ -159,14 +160,34 @@ type AccountUpdate struct {
 	Account    Account
 }
 
-// ApplyOutcome is what applying an account update did.
+// TransactionUpdate is one decoded record of order-escrow's transaction
+// stream whose snapshot is COMPLETED: the event's identity and the completed
+// transaction it carries.
+type TransactionUpdate struct {
+	EventID    uuid.UUID
+	EventType  string // EventMetadata.event_type
+	Topic      string
+	OccurredAt time.Time
+	// Version is the snapshot's version (= EventMetadata.aggregate_version).
+	Version     int64
+	Transaction CompletedTransaction
+}
+
+// ApplyOutcome is what processing one consumed event did: an account update
+// applied to the account projection, or a transaction update recorded in
+// completed_transactions.
 type ApplyOutcome int8
 
 const (
-	// Applied: the snapshot was newer and is now the projection.
+	// Applied: the event changed the state. For an account update, the
+	// snapshot was newer and is now the projection; for a transaction
+	// update, the completed transaction was recorded now.
 	Applied ApplyOutcome = iota + 1
-	// Stale: the snapshot was not newer than the projection (an older event
-	// after a newer one, or an event that repeats the current version).
+	// Stale: the event was new but changed nothing. For an account update,
+	// the snapshot was not newer than the projection (an older event after a
+	// newer one, or an event that repeats the current version); for a
+	// transaction update, an earlier event had already recorded the
+	// completion (BonusAwarded after PayoutReleased).
 	Stale
 	// Duplicate: the event id was processed before; nothing changed.
 	Duplicate
@@ -194,8 +215,9 @@ type ProcessedEvent struct {
 	ProcessedAt      time.Time
 }
 
-// CompletedTransaction is a completed escrow transaction between two users;
-// it unlocks one rating per party.
+// CompletedTransaction is a completed escrow transaction between two users,
+// as order-escrow's transaction stream reports it; it unlocks one rating per
+// party.
 type CompletedTransaction struct {
 	ID          uuid.UUID
 	FarmerID    uuid.UUID

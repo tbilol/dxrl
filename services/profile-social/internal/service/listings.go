@@ -23,14 +23,14 @@ import (
 // Other users see ACTIVE listings only (asking for another status is
 // PERMISSION_DENIED) and only of a user whose profile is public; the owner
 // may ask for any status. When catalog is not configured or unreachable the
-// answer is an empty page and a warning is logged.
+// answer is an empty page and a warning is logged, so a profile still
+// renders while catalog is down.
 //
-// TODO(catalog): catalog is not built yet, so this degrades to empty pages.
-// The proto's service comment has profile-social consume the listing stream
-// (agrogram.catalog.listing.v1) for this RPC instead; if the live call ever
-// becomes a latency or availability problem, project ListingEvent snapshots
-// into a local listing-card table with the account-stream consumer's
-// machinery (inbox, version guard) and serve from it.
+// Design note: the proto's service comment has profile-social consume the
+// listing stream (agrogram.catalog.listing.v1) for this RPC instead; if the
+// live call ever becomes a latency or availability problem, project
+// ListingEvent snapshots into a local listing-card table with the stream
+// consumer's machinery (inbox, version guard) and serve from it.
 func (s *Service) ListUserListings(ctx context.Context, p auth.Principal, userID string, kind commonv1.ListingKind,
 	statuses []eventsv1.ListingStatus, page domain.PageRequest,
 ) (domain.ListingPage, error) {
@@ -59,7 +59,7 @@ func (s *Service) ListUserListings(ctx context.Context, p auth.Principal, userID
 		}
 	}
 	if s.listings == nil {
-		// STUB: no catalog address (catalog is not built yet): an empty page.
+		// No catalog address (PROFILE_SOCIAL_CATALOG_ADDR): an empty page.
 		s.log.WarnContext(ctx, "catalog is not configured (PROFILE_SOCIAL_CATALOG_ADDR); answering an empty page",
 			"owner_id", owner)
 		return domain.ListingPage{Listings: []*profilesocialv1.ListingCard{}}, nil
@@ -68,7 +68,7 @@ func (s *Service) ListUserListings(ctx context.Context, p auth.Principal, userID
 		OwnerID: owner, Kind: kind, Statuses: statuses, Page: page,
 	})
 	if errors.Is(err, domain.ErrDependencyUnavailable) {
-		// STUB: catalog unreachable (not deployed yet, or down): an empty page.
+		// catalog unreachable (not running, down or too slow): an empty page.
 		s.log.WarnContext(ctx, "catalog unavailable; answering an empty page", "owner_id", owner, "error", err)
 		return domain.ListingPage{Listings: []*profilesocialv1.ListingCard{}}, nil
 	}

@@ -148,4 +148,20 @@ func transactionEvent(id, farmer, reseller uuid.UUID, state eventsv1.Transaction
 	return env
 }
 
+// bonusAwarded is the BonusAwarded order-escrow publishes right after the
+// PayoutReleased done: the same COMPLETED transaction at the next version
+// (bonus_points changed), with its own event id.
+func bonusAwarded(done *eventsv1.TransactionEvent) *eventsv1.TransactionEvent {
+	env := proto.CloneOf(done)
+	env.Metadata.EventId = uuid.Must(uuid.NewV7()).String()
+	env.Metadata.EventType = "agrogram.events.v1.BonusAwarded"
+	env.Metadata.CausationId = done.GetMetadata().GetEventId()
+	env.Metadata.AggregateVersion++
+	env.Transaction.Version++
+	env.Transaction.BonusPoints = 1
+	env.Event = &eventsv1.TransactionEvent_BonusAwarded{BonusAwarded: &eventsv1.BonusAwarded{
+		RecipientId: env.GetTransaction().GetResellerId(), Points: 1}}
+	return env
+}
+
 func timestampOf(t time.Time) *timestamppb.Timestamp { return timestamppb.New(t) }

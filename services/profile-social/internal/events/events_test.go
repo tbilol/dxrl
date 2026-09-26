@@ -1,6 +1,9 @@
 package events
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -238,22 +241,119 @@ func TestDecodeTransactionRecord(t *testing.T) {
 	id, farmer, reseller := uuid.New(), uuid.New(), uuid.New()
 
 	done := transactionEvent(id, farmer, reseller, eventsv1.TransactionState_TRANSACTION_STATE_COMPLETED)
-	tx, completed, err := DecodeTransactionRecord(record(t, TopicTransaction, done, id.String()), v)
+	u, completed, err := DecodeTransactionRecord(record(t, TopicTransaction, done, id.String()), v)
 	if err != nil || !completed {
 		t.Fatalf("completed = %v, err = %v", completed, err)
 	}
-	if tx.ID != id || tx.FarmerID != farmer || tx.ResellerID != reseller || !tx.CompletedAt.Equal(testNow) {
+	if u.EventID.String() != done.GetMetadata().GetEventId() || u.EventType != "agrogram.events.v1.PayoutReleased" ||
+		u.Topic != TopicTransaction || !u.OccurredAt.Equal(testNow) || u.Version != 6 {
+		t.Fatalf("update = %+v", u)
+	}
+	if tx := u.Transaction; tx.ID != id || tx.FarmerID != farmer || tx.ResellerID != reseller || !tx.CompletedAt.Equal(testNow) {
 		t.Fatalf("transaction = %+v", tx)
 	}
 
-	held := transactionEvent(id, farmer, reseller, eventsv1.TransactionState_TRANSACTION_STATE_PAYMENT_HELD)
-	if _, completed, err := DecodeTransactionRecord(record(t, TopicTransaction, held, id.String()), v); err != nil || completed {
-		t.Fatalf("payment held: completed = %v, err = %v", completed, err)
+	// BonusAwarded repeats COMPLETED at the next version, with its own event id.
+	bonus := bonusAwarded(done)
+	u, completed, err = DecodeTransactionRecord(record(t, TopicTransaction, bonus, id.String()), v)
+	if err != nil || !completed || u.EventID.String() != bonus.GetMetadata().GetEventId() ||
+		u.EventType != "agrogram.events.v1.BonusAwarded" || u.Version != 7 || u.Transaction.ID != id {
+		t.Fatalf("bonus awarded: update = %+v, completed = %v, err = %v", u, completed, err)
 	}
 
-	same := transactionEvent(id, farmer, farmer, eventsv1.TransactionState_TRANSACTION_STATE_COMPLETED)
-	if _, _, err := DecodeTransactionRecord(record(t, TopicTransaction, same, id.String()), v); !IsPermanent(err) {
-		t.Fatalf("one party on both sides: err = %v, want a permanent error", err)
+	// Without completed_at, the completion time is the event's occurred_at.
+	late := transactionEvent(id, farmer, reseller, eventsv1.TransactionState_TRANSACTION_STATE_COMPLETED)
+	late.Transaction.CompletedAt = nil
+	late.Metadata.OccurredAt = timestampOf(testNow.Add(time.Minute))
+	u, completed, err = DecodeTransactionRecord(record(t, TopicTransaction, late, id.String()), v)
+	if err != nil || !completed || !u.Transaction.CompletedAt.Equal(testNow.Add(time.Minute)) {
+		t.Fatalf("completed_at fallback: transaction = %+v, completed = %v, err = %v", u.Transaction, completed, err)
+	}
+
+	// Every state before COMPLETED is skipped: no error, nothing to record.
+	for _, state := range []eventsv1.TransactionState{
+		eventsv1.TransactionState_TRANSACTION_STATE_AWAITING_PAYMENT,
+		eventsv1.TransactionState_TRANSACTION_STATE_PAYMENT_HELD,
+		eventsv1.TransactionState_TRANSACTION_STATE_RECEIPT_SUBMITTED,
+		eventsv1.TransactionState_TRANSACTION_STATE_HANDED_OVER,
+		eventsv1.TransactionState_TRANSACTION_STATE_RECEIVED,
+	} {
+		env := transactionEvent(id, farmer, reseller, state)
+		u, completed, err := DecodeTransactionRecord(record(t, TopicTransaction, env, id.String()), v)
+		if err != nil || completed || u != (domain.TransactionUpdate{}) {
+			t.Fatalf("%s: update = %+v, completed = %v, err = %v; want skipped", state, u, completed, err)
+		}
+	}
+}
+
+// Poison is decided before the state: a record whose snapshot contradicts its
+// metadata is dead-lettered even when it would have been skipped.
+func TestDecodeTransactionRecordPoison(t *testing.T) {
+	v := newValidator(t)
+	id, farmer, reseller := uuid.New(), uuid.New(), uuid.New()
+	completed := func() *eventsv1.TransactionEvent {
+		return transactionEvent(id, farmer, reseller, eventsv1.TransactionState_TRANSACTION_STATE_COMPLETED)
+	}
+	held := func() *eventsv1.TransactionEvent {
+		return transactionEvent(id, farmer, reseller, eventsv1.TransactionState_TRANSACTION_STATE_PAYMENT_HELD)
+	}
+	mutated := func(env *eventsv1.TransactionEvent, mutate func(*eventsv1.TransactionEvent)) *kgo.Record {
+		mutate(env)
+		return record(t, TopicTransaction, env, id.String())
+	}
+	cases := map[string]*kgo.Record{
+		"garbage": {Topic: TopicTransaction, Key: []byte(id.String()), Value: []byte{0xff, 0xff, 0xff}},
+		"content-type": func() *kgo.Record {
+			r := record(t, TopicTransaction, completed(), id.String())
+			r.Headers[0].Value = []byte("application/json")
+			return r
+		}(),
+		"no snapshot": mutated(completed(), func(e *eventsv1.TransactionEvent) { e.Transaction = nil }),
+		"one party on both sides": mutated(completed(), func(e *eventsv1.TransactionEvent) {
+			e.Transaction.ResellerId = farmer.String()
+		}),
+		"wrong aggregate type": mutated(completed(), func(e *eventsv1.TransactionEvent) {
+			e.Metadata.AggregateType = commonv1.ResourceType_RESOURCE_TYPE_USER
+		}),
+		"id mismatch": mutated(completed(), func(e *eventsv1.TransactionEvent) { e.Transaction.Id = uuid.NewString() }),
+		"version mismatch": mutated(completed(), func(e *eventsv1.TransactionEvent) {
+			e.Metadata.AggregateVersion = 7
+		}),
+		"id mismatch before COMPLETED": mutated(held(), func(e *eventsv1.TransactionEvent) {
+			e.Metadata.AggregateId = uuid.NewString()
+		}),
+		"version mismatch before COMPLETED": mutated(held(), func(e *eventsv1.TransactionEvent) {
+			e.Transaction.Version = 2
+		}),
+	}
+	for name, r := range cases {
+		if u, completed, err := DecodeTransactionRecord(r, v); !IsPermanent(err) || completed {
+			t.Errorf("%s: update = %+v, completed = %v, err = %v; want a permanent error", name, u, completed, err)
+		}
+	}
+}
+
+// The handler records a completed transaction keyed by something else than
+// its id (it only warns), and wraps a recorder failure with the event and
+// transaction ids, leaving it retryable.
+func TestTransactionHandler(t *testing.T) {
+	id, farmer, reseller := uuid.New(), uuid.New(), uuid.New()
+	done := transactionEvent(id, farmer, reseller, eventsv1.TransactionState_TRANSACTION_STATE_COMPLETED)
+	rec := &fakeRecorder{}
+	h := NewTransactionHandler(rec, newValidator(t), slog.New(slog.DiscardHandler))
+	if err := h.HandleRecord(context.Background(), record(t, TopicTransaction, done, "not-the-transaction-id")); err != nil {
+		t.Fatal(err)
+	}
+	if calls, outcomes, recorded := rec.snapshot(); len(calls) != 1 || outcomes[0] != domain.Applied || recorded != 1 {
+		t.Fatalf("calls = %+v, outcomes = %v", calls, outcomes)
+	}
+
+	rec.err = errDBDown
+	bonus := bonusAwarded(done)
+	err := h.HandleRecord(context.Background(), record(t, TopicTransaction, bonus, id.String()))
+	if !errors.Is(err, errDBDown) || IsPermanent(err) || !strings.Contains(err.Error(), id.String()) ||
+		!strings.Contains(err.Error(), bonus.GetMetadata().GetEventId()) {
+		t.Fatalf("err = %v, want the recorder's error with the event and transaction ids", err)
 	}
 }
 

@@ -110,6 +110,15 @@ func account(user uuid.UUID, version int64, farmer bool) domain.AccountUpdate {
 	}
 }
 
+// completion is a decoded COMPLETED transaction-stream record for tx:
+// eventType at version, with a fresh event id.
+func completion(tx domain.CompletedTransaction, eventType string, version int64) domain.TransactionUpdate {
+	return domain.TransactionUpdate{
+		EventID: uuid.Must(uuid.NewV7()), EventType: "agrogram.events.v1." + eventType, Topic: events.TopicTransaction,
+		OccurredAt: time.Now(), Version: version, Transaction: tx,
+	}
+}
+
 func wantReason(t *testing.T, err error, reason commonv1.ErrorReason) {
 	t.Helper()
 	var ae *apperr.Error
@@ -245,10 +254,42 @@ func TestIntegrationRepository(t *testing.T) {
 		_, err := svc.RateUser(ctx, reseller, uuid.NewString(), uuid.NewString(), 5, "")
 		wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_RATING_NOT_ALLOWED)
 
+		// PayoutReleased records the transaction; its redelivery is a
+		// duplicate and BonusAwarded (a new event id) is stale.
 		tx := domain.CompletedTransaction{ID: uuid.New(), FarmerID: farmer.UserID, ResellerID: reseller.UserID, CompletedAt: time.Now()}
-		for i, want := range []bool{true, false} {
-			if got, err := svc.RecordCompletedTransaction(ctx, tx); err != nil || got != want {
-				t.Fatalf("record %d = %v, %v", i+1, got, err)
+		payout := completion(tx, "PayoutReleased", 6)
+		for i, step := range []struct {
+			u    domain.TransactionUpdate
+			want domain.ApplyOutcome
+		}{
+			{payout, domain.Applied},
+			{payout, domain.Duplicate},
+			{completion(tx, "BonusAwarded", 7), domain.Stale},
+		} {
+			if got, err := svc.RecordCompletedTransaction(ctx, step.u); err != nil || got != step.want {
+				t.Fatalf("record %d = %s, %v; want %s", i+1, got, err, step.want)
+			}
+		}
+		var (
+			topic, eventType string
+			aggregateID      uuid.UUID
+			aggregateVersion int64
+			inboxRows        int
+		)
+		// event_id is the inbox's primary key: one row, however many deliveries.
+		if err := pool.QueryRow(ctx, `
+SELECT topic, event_type, aggregate_id, aggregate_version FROM processed_events WHERE event_id = $1`, payout.EventID).
+			Scan(&topic, &eventType, &aggregateID, &aggregateVersion); err != nil || topic != events.TopicTransaction ||
+			eventType != payout.EventType || aggregateID != tx.ID || aggregateVersion != 6 {
+			t.Fatalf("inbox row of PayoutReleased = %q, %q, %s, %d, %v", topic, eventType, aggregateID, aggregateVersion, err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM processed_events WHERE aggregate_id = $1`, tx.ID).
+			Scan(&inboxRows); err != nil || inboxRows != 2 {
+			t.Fatalf("inbox rows of the transaction = %d, %v; want 2 (PayoutReleased once, BonusAwarded)", inboxRows, err)
+		}
+		for _, p := range []auth.Principal{farmer, reseller} {
+			if prof, err := svc.GetProfile(ctx, p, p.UserID.String()); err != nil || prof.DealsCount != 1 {
+				t.Fatalf("deals of %s = %d, %v; want 1", p.UserID, prof.DealsCount, err)
 			}
 		}
 		reqID := uuid.NewString()
@@ -313,9 +354,16 @@ func TestIntegrationRepository(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer dead.Close()
-		_, err = service.New(postgres.New(dead), nil, nil).ApplyAccountEvent(ctx, account(uuid.New(), 1, false))
+		deadSvc := service.New(postgres.New(dead), nil, nil)
+		_, err = deadSvc.ApplyAccountEvent(ctx, account(uuid.New(), 1, false))
 		if err == nil || !postgres.IsTransient(err) {
-			t.Fatalf("err = %v, want a transient error", err)
+			t.Fatalf("account event: err = %v, want a transient error", err)
+		}
+		_, err = deadSvc.RecordCompletedTransaction(ctx, completion(domain.CompletedTransaction{
+			ID: uuid.New(), FarmerID: uuid.New(), ResellerID: uuid.New(), CompletedAt: time.Now(),
+		}, "PayoutReleased", 6))
+		if err == nil || !postgres.IsTransient(err) {
+			t.Fatalf("transaction event: err = %v, want a transient error", err)
 		}
 	})
 }
