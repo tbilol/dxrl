@@ -95,7 +95,7 @@ func (s *Service) CreateListing(ctx context.Context, p auth.Principal, requestID
 			Kind:            kind,
 			OwnerID:         owner,
 			ListingFields:   f,
-			RemainingGrams:  f.Quantity.Grams, // TODO(phase3): nothing is committed to escrow yet
+			RemainingGrams:  f.Quantity.Grams, // a new listing has no escrow transactions: all of it remains
 			Status:          domain.StatusActive,
 			Version:         1,
 			CreateRequestID: reqID,
@@ -132,19 +132,27 @@ func (s *Service) CreateListing(ctx context.Context, p auth.Principal, requestID
 }
 
 // GetListing returns a listing. ACTIVE listings are visible to everyone
-// (anonymous callers too); other statuses only to the owner, staff
-// (ROLE_ADMIN) and order-escrow (x-agrogram-caller), which snapshots
-// listings into transactions. Everyone else gets NOT_FOUND. An ACTIVE
-// listing opened by someone other than its owner, staff or a service counts
-// as a view, in the background.
+// (anonymous callers too); other statuses (CLOSED, SOLD_OUT, BLOCKED,
+// DELETED) only to the owner, the parties of escrow transactions on the
+// listing (catalog.proto; catalog knows them from order-escrow's transaction
+// stream), staff (ROLE_ADMIN) and order-escrow (x-agrogram-caller), which
+// snapshots listings into transactions. Everyone else gets NOT_FOUND. An
+// ACTIVE listing opened by someone other than its owner, staff or a service
+// counts as a view, in the background.
 func (s *Service) GetListing(ctx context.Context, p auth.Principal, listingID string) (domain.Listing, error) {
 	id, err := parseID("listing_id", listingID)
 	if err != nil {
 		return domain.Listing{}, err
 	}
-	var l domain.Listing
+	var (
+		l       domain.Listing
+		visible bool
+	)
 	err = s.store.Run(ctx, func(q Queries) error {
-		l, err = q.GetListing(ctx, id)
+		if l, err = q.GetListing(ctx, id); err != nil {
+			return err
+		}
+		visible, err = canRead(ctx, q, p, l)
 		return err
 	})
 	switch {
@@ -153,24 +161,36 @@ func (s *Service) GetListing(ctx context.Context, p auth.Principal, listingID st
 	case err != nil:
 		return domain.Listing{}, fmt.Errorf("get listing: %w", err)
 	}
-	if !canSee(p, l) {
+	if !visible {
 		return domain.Listing{}, listingNotFound(id)
 	}
 	s.countView(p, l)
 	return l, nil
 }
 
-// canSee reports whether p may read l.
-//
-// TODO(phase3): catalog.proto also lets "the parties of transactions on"
-// a listing read it when it is not ACTIVE; that needs order-escrow's
-// transaction stream (or a call to it). Until then only the owner, staff and
-// order-escrow itself can.
+// canSee reports whether p may read l by the rules that need no lookup: l is
+// ACTIVE, or p is its owner, staff or order-escrow. canRead adds the parties
+// of escrow transactions on l.
 func canSee(p auth.Principal, l domain.Listing) bool {
 	return l.Status == domain.StatusActive ||
 		(p.Authenticated() && p.UserID == l.OwnerID) ||
 		p.Staff() ||
 		p.Caller == CallerOrderEscrow
+}
+
+// canRead reports whether p may read l: canSee, or p is signed in and the
+// farmer or the reseller of an escrow transaction on l, whatever its status
+// (catalog.proto: "Non-ACTIVE listings are visible to their owner, to the
+// parties of transactions on them, and to staff"). The party lookup runs only
+// when canSee says no.
+func canRead(ctx context.Context, q Queries, p auth.Principal, l domain.Listing) (bool, error) {
+	if canSee(p, l) {
+		return true, nil
+	}
+	if !p.Authenticated() {
+		return false, nil
+	}
+	return q.IsTransactionParty(ctx, l.ID, p.UserID)
 }
 
 // countView records a view of l unless the owner, staff or another service
@@ -190,6 +210,14 @@ func (s *Service) countView(p auth.Principal, l domain.Listing) {
 // concurrency check; a stale one is ABORTED / CONFLICT with the current
 // version. Values equal to the current ones change nothing (no version bump).
 // A new product must not be retired; an unchanged retired product stays.
+//
+// The quantity cannot drop below what escrow transactions have committed of
+// the listing (INSUFFICIENT_QUANTITY, with requested_grams and
+// committed_grams). The remaining quantity becomes the quantity minus that,
+// and a listing with nothing left becomes SOLD_OUT, the rule the
+// transaction-stream consumer applies (ApplyTransactionEvent). The committed
+// quantity is read under the listing's row lock, which the consumer takes
+// too, so the two cannot interleave.
 func (s *Service) UpdateListing(ctx context.Context, p auth.Principal, listingID string, f domain.ListingFields,
 	mask []string, expectedVersion int64,
 ) (domain.Listing, error) {
@@ -245,9 +273,14 @@ func (s *Service) UpdateListing(ctx context.Context, p auth.Principal, listingID
 		if err != nil {
 			return err
 		}
-		// TODO(phase3): remaining = quantity - quantity committed to escrow
-		// (and a quantity below the committed one is INSUFFICIENT_QUANTITY).
-		next.RemainingGrams = next.Quantity.Grams
+		committed, err := q.CommittedGrams(ctx, id)
+		if err != nil {
+			return err
+		}
+		if next.Quantity.Grams < committed {
+			return insufficient(cur, next.Quantity.Grams, committed)
+		}
+		next = withCommitted(next, committed)
 		next.Version++
 		next.UpdatedAt = s.clock()
 		doc := searchDocument(pt, next.ListingFields)
@@ -265,7 +298,7 @@ func (s *Service) UpdateListing(ctx context.Context, p auth.Principal, listingID
 	}
 	if changed {
 		s.log.InfoContext(ctx, "listing updated", "listing_id", id, "fields", mask, "version", l.Version,
-			"request_id", p.RequestID)
+			"status", statusName(l.Status), "request_id", p.RequestID)
 	}
 	return l, nil
 }
@@ -326,8 +359,9 @@ func (s *Service) DeleteListing(ctx context.Context, p auth.Principal, listingID
 }
 
 // lockOwned locks listing id for a change by its owner. A listing of
-// someone else is PERMISSION_DENIED when the caller may see it and NOT_FOUND
-// otherwise, so hidden listings do not leak.
+// someone else is PERMISSION_DENIED when the caller may read it (canRead,
+// transaction parties included) and NOT_FOUND otherwise, so hidden listings
+// do not leak.
 func lockOwned(ctx context.Context, q Queries, p auth.Principal, caller, id uuid.UUID, action string) (domain.Listing, error) {
 	cur, err := q.LockListing(ctx, id)
 	if errors.Is(err, domain.ErrNotFound) {
@@ -337,7 +371,11 @@ func lockOwned(ctx context.Context, q Queries, p auth.Principal, caller, id uuid
 		return cur, err
 	}
 	if cur.OwnerID != caller {
-		if canSee(p, cur) {
+		visible, err := canRead(ctx, q, p, cur)
+		if err != nil {
+			return cur, err
+		}
+		if visible {
 			return cur, apperr.New(commonv1.ErrorReason_ERROR_REASON_PERMISSION_DENIED,
 				"only the owner may "+action+" a listing", "listing_id", id.String())
 		}
@@ -349,6 +387,16 @@ func lockOwned(ctx context.Context, q Queries, p auth.Principal, caller, id uuid
 func notActive(l domain.Listing) error {
 	return apperr.New(commonv1.ErrorReason_ERROR_REASON_LISTING_NOT_ACTIVE,
 		"only ACTIVE listings can be edited", "listing_id", l.ID.String(), "status", statusName(l.Status))
+}
+
+// insufficient is UpdateListing's INSUFFICIENT_QUANTITY: a quantity below
+// what escrow transactions have committed of l (metadata like order-escrow's
+// error of the same reason).
+func insufficient(l domain.Listing, requested, committed int64) error {
+	return apperr.New(commonv1.ErrorReason_ERROR_REASON_INSUFFICIENT_QUANTITY,
+		"the quantity cannot be less than what escrow transactions have already committed",
+		"listing_id", l.ID.String(), "requested_grams", strconv.FormatInt(requested, 10),
+		"committed_grams", strconv.FormatInt(committed, 10))
 }
 
 func conflict(l domain.Listing) error {

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"sync"
@@ -24,6 +26,9 @@ type fakeDB struct {
 	docs     map[uuid.UUID]domain.SearchDocument
 	products map[commonv1.ProductType]domain.ProductType
 	outbox   []events.Message
+	// txs is listing_transactions by transaction id, processed the inbox.
+	txs       map[uuid.UUID]domain.ListingTransaction
+	processed map[uuid.UUID]domain.ProcessedEvent
 	// lockedOwners records LockOwner calls.
 	lockedOwners []uuid.UUID
 	// queries records FindListings calls; hits, when set, answers them
@@ -39,6 +44,8 @@ func (d *fakeDB) clone() *fakeDB {
 	c.listings = maps.Clone(d.listings)
 	c.docs = maps.Clone(d.docs)
 	c.outbox = slices.Clone(d.outbox)
+	c.txs = maps.Clone(d.txs)
+	c.processed = maps.Clone(d.processed)
 	c.lockedOwners = slices.Clone(d.lockedOwners)
 	c.queries = slices.Clone(d.queries)
 	return &c
@@ -66,9 +73,11 @@ var testProducts = []domain.ProductType{
 
 func newFakeStore() *fakeStore {
 	db := &fakeDB{
-		listings: map[uuid.UUID]domain.Listing{},
-		docs:     map[uuid.UUID]domain.SearchDocument{},
-		products: map[commonv1.ProductType]domain.ProductType{},
+		listings:  map[uuid.UUID]domain.Listing{},
+		docs:      map[uuid.UUID]domain.SearchDocument{},
+		products:  map[commonv1.ProductType]domain.ProductType{},
+		txs:       map[uuid.UUID]domain.ListingTransaction{},
+		processed: map[uuid.UUID]domain.ProcessedEvent{},
 	}
 	for _, p := range testProducts {
 		db.products[p.Type] = p
@@ -187,6 +196,23 @@ func (q *fakeQueries) SaveListing(_ context.Context, l domain.Listing, doc *doma
 	return nil
 }
 
+func (q *fakeQueries) SaveRemaining(_ context.Context, l domain.Listing) error {
+	if q.db.failWith != nil {
+		return q.db.failWith
+	}
+	cur, ok := q.db.listings[l.ID]
+	if !ok {
+		return domain.ErrNotFound
+	}
+	if l.RemainingGrams < 0 || l.RemainingGrams > cur.Quantity.Grams {
+		return fmt.Errorf("remaining %d g violates listings_remaining_grams_check (quantity %d g)",
+			l.RemainingGrams, cur.Quantity.Grams)
+	}
+	cur.RemainingGrams, cur.Status, cur.Version, cur.UpdatedAt = l.RemainingGrams, l.Status, l.Version, l.UpdatedAt
+	q.db.listings[l.ID] = cur
+	return nil
+}
+
 // FindListings answers the canned hits when set; otherwise it filters the
 // listings by the criteria the fake understands (statuses, kind, owner,
 // products, regions) and orders them newest first, keyset on (created_at,
@@ -221,6 +247,87 @@ func (q *fakeQueries) FindListings(_ context.Context, lq domain.ListingQuery) ([
 // when l comes after it in ascending order.
 func newer(l domain.Listing, at time.Time, id uuid.UUID) int {
 	return cmp.Or(l.CreatedAt.Compare(at), bytes.Compare(l.ID[:], id[:]))
+}
+
+func (q *fakeQueries) CommittedGrams(_ context.Context, listingID uuid.UUID) (int64, error) {
+	if q.db.failWith != nil {
+		return 0, q.db.failWith
+	}
+	var sum int64
+	for _, t := range q.db.txs {
+		if t.ListingID == listingID {
+			sum += t.QuantityGrams
+		}
+	}
+	return sum, nil
+}
+
+func (q *fakeQueries) IsTransactionParty(_ context.Context, listingID, user uuid.UUID) (bool, error) {
+	if q.db.failWith != nil {
+		return false, q.db.failWith
+	}
+	for _, t := range q.db.txs {
+		if t.ListingID == listingID && (t.FarmerID == user || t.ResellerID == user) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (q *fakeQueries) MarkProcessed(_ context.Context, e domain.ProcessedEvent) (bool, error) {
+	if q.db.failWith != nil {
+		return false, q.db.failWith
+	}
+	if _, ok := q.db.processed[e.EventID]; ok {
+		return false, nil
+	}
+	q.db.processed[e.EventID] = e
+	return true, nil
+}
+
+func (q *fakeQueries) GetListingTransaction(_ context.Context, id uuid.UUID) (domain.ListingTransaction, error) {
+	if q.db.failWith != nil {
+		return domain.ListingTransaction{}, q.db.failWith
+	}
+	t, ok := q.db.txs[id]
+	if !ok {
+		return t, domain.ErrNotFound
+	}
+	return t, nil
+}
+
+// errDuplicateKey and errForeignKey stand in for the constraint violations
+// Postgres would raise.
+var (
+	errDuplicateKey = errors.New("duplicate key value violates unique constraint")
+	errForeignKey   = errors.New("insert violates foreign key constraint")
+)
+
+func (q *fakeQueries) InsertListingTransaction(_ context.Context, t domain.ListingTransaction) error {
+	if q.db.failWith != nil {
+		return q.db.failWith
+	}
+	if _, ok := q.db.txs[t.ID]; ok {
+		return errDuplicateKey
+	}
+	if _, ok := q.db.listings[t.ListingID]; !ok {
+		return errForeignKey
+	}
+	q.db.txs[t.ID] = t
+	return nil
+}
+
+func (q *fakeQueries) UpdateListingTransaction(_ context.Context, t domain.ListingTransaction) (bool, error) {
+	if q.db.failWith != nil {
+		return false, q.db.failWith
+	}
+	cur, ok := q.db.txs[t.ID]
+	if !ok || cur.Version >= t.Version {
+		return false, nil
+	}
+	cur.State, cur.Version, cur.UpdatedAt = t.State, t.Version, t.UpdatedAt
+	q.db.txs[t.ID] = cur
+	return true, nil
 }
 
 func (q *fakeQueries) GetProductType(_ context.Context, t commonv1.ProductType) (domain.ProductType, error) {

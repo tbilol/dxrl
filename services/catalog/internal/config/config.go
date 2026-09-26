@@ -27,10 +27,18 @@ type Config struct {
 	// warning at startup).
 	RedisURL string `env:"REDIS_URL"`
 
-	// Empty disables the outbox relay (with a warning): ListingCreated
-	// events accumulate in the outbox table.
+	// Empty disables the outbox relay and the stream consumer (with a
+	// warning): ListingCreated events accumulate in the outbox table, and no
+	// escrow transaction is seen, so remaining quantities never drop, no
+	// listing becomes SOLD_OUT and transaction parties cannot read listings
+	// that are not ACTIVE.
 	KafkaBrokers  []string `env:"KAFKA_BROKERS" envSeparator:","`
 	KafkaClientID string   `env:"KAFKA_CLIENT_ID" envDefault:"catalog"`
+	// The consumer group of order-escrow's transaction stream, also
+	// DeadLetter.consumer_group.
+	KafkaConsumerGroup string `env:"KAFKA_CONSUMER_GROUP" envDefault:"catalog"`
+	// The transaction stream's topic (events.TopicTransaction by default).
+	KafkaTransactionTopic string `env:"KAFKA_TRANSACTION_TOPIC" envDefault:"agrogram.orderescrow.transaction.v1"`
 
 	GRPCAddr       string `env:"GRPC_ADDR" envDefault:":50051"`
 	HTTPAddr       string `env:"HTTP_ADDR" envDefault:":8081"`
@@ -47,6 +55,13 @@ type Config struct {
 
 	CreateRateLimit  int           `env:"CREATE_RATE_LIMIT" envDefault:"30"`
 	CreateRateWindow time.Duration `env:"CREATE_RATE_WINDOW" envDefault:"1h"`
+
+	ConsumerMaxAttempts     int           `env:"CONSUMER_MAX_ATTEMPTS" envDefault:"5"`
+	ConsumerRetryBackoff    time.Duration `env:"CONSUMER_RETRY_BACKOFF" envDefault:"500ms"`
+	ConsumerRetryBackoffMax time.Duration `env:"CONSUMER_RETRY_BACKOFF_MAX" envDefault:"30s"`
+	ConsumerHandleTimeout   time.Duration `env:"CONSUMER_HANDLE_TIMEOUT" envDefault:"10s"`
+	ConsumerBatchSize       int           `env:"CONSUMER_BATCH_SIZE" envDefault:"100"`
+	InboxRetention          time.Duration `env:"INBOX_RETENTION" envDefault:"720h"`
 
 	ViewsFlushInterval time.Duration `env:"VIEWS_FLUSH_INTERVAL" envDefault:"2s"`
 	ViewsBufferSize    int           `env:"VIEWS_BUFFER_SIZE" envDefault:"10000"`
@@ -98,12 +113,15 @@ func HTTPAddr() (string, error) {
 func (c Config) validate() error {
 	var errs []error
 	positive := map[string]time.Duration{
-		"CREATE_RATE_WINDOW":   c.CreateRateWindow,
-		"VIEWS_FLUSH_INTERVAL": c.ViewsFlushInterval,
-		"OUTBOX_INTERVAL":      c.OutboxInterval,
-		"OUTBOX_MAX_BACKOFF":   c.OutboxMaxBackoff,
-		"HEALTH_INTERVAL":      c.HealthInterval,
-		"SHUTDOWN_TIMEOUT":     c.ShutdownTimeout,
+		"CREATE_RATE_WINDOW":         c.CreateRateWindow,
+		"CONSUMER_RETRY_BACKOFF":     c.ConsumerRetryBackoff,
+		"CONSUMER_RETRY_BACKOFF_MAX": c.ConsumerRetryBackoffMax,
+		"CONSUMER_HANDLE_TIMEOUT":    c.ConsumerHandleTimeout,
+		"VIEWS_FLUSH_INTERVAL":       c.ViewsFlushInterval,
+		"OUTBOX_INTERVAL":            c.OutboxInterval,
+		"OUTBOX_MAX_BACKOFF":         c.OutboxMaxBackoff,
+		"HEALTH_INTERVAL":            c.HealthInterval,
+		"SHUTDOWN_TIMEOUT":           c.ShutdownTimeout,
 	}
 	for name, d := range positive {
 		if d <= 0 {
@@ -111,6 +129,7 @@ func (c Config) validate() error {
 		}
 	}
 	for name, d := range map[string]time.Duration{
+		"INBOX_RETENTION":    c.InboxRetention,
 		"OUTBOX_RETENTION":   c.OutboxRetention,
 		"VIEWS_DEDUP_WINDOW": c.ViewsDedupWindow,
 	} {
@@ -124,12 +143,27 @@ func (c Config) validate() error {
 		"BUY_REQUEST_QUOTA_DEFAULT": c.BuyRequestQuotaDefault,
 		"BUY_REQUEST_QUOTA_PREMIUM": c.BuyRequestQuotaPremium,
 		"CREATE_RATE_LIMIT":         c.CreateRateLimit,
+		"CONSUMER_MAX_ATTEMPTS":     c.ConsumerMaxAttempts,
+		"CONSUMER_BATCH_SIZE":       c.ConsumerBatchSize,
 		"VIEWS_BUFFER_SIZE":         c.ViewsBufferSize,
 		"OUTBOX_BATCH_SIZE":         c.OutboxBatchSize,
 		"DATABASE_MAX_CONNS":        int(c.DatabaseMaxConns),
 	} {
 		if n < 1 {
 			errs = append(errs, fmt.Errorf("%s%s must be at least 1, got %d", Prefix, name, n))
+		}
+	}
+	if c.ConsumerRetryBackoffMax < c.ConsumerRetryBackoff {
+		errs = append(errs, fmt.Errorf("%sCONSUMER_RETRY_BACKOFF_MAX must be >= %sCONSUMER_RETRY_BACKOFF", Prefix, Prefix))
+	}
+	if len(c.KafkaBrokers) > 0 {
+		for name, v := range map[string]string{
+			"KAFKA_CONSUMER_GROUP":    c.KafkaConsumerGroup,
+			"KAFKA_TRANSACTION_TOPIC": c.KafkaTransactionTopic,
+		} {
+			if strings.TrimSpace(v) == "" {
+				errs = append(errs, fmt.Errorf("%s%s must not be empty", Prefix, name))
+			}
 		}
 	}
 	var lvl slog.Level

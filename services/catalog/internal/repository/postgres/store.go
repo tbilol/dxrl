@@ -4,6 +4,9 @@ package postgres
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -21,7 +24,8 @@ type DB interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// Store implements service.Store, events.OutboxStore and views.Store.
+// Store implements service.Store, events.OutboxStore, events.InboxStore and
+// views.Store.
 type Store struct {
 	db  DB
 	now func() time.Time
@@ -69,6 +73,47 @@ type queries struct {
 }
 
 var _ service.Queries = (*queries)(nil)
+
+// IsTransient reports whether err is a failure of the environment rather than
+// of the data being written, worth retrying for as long as it lasts: the
+// database is unreachable, restarting, overloaded or too slow, rejects the
+// credentials, does not exist, or has no (or an older) schema (`migrate up`
+// not run), or the transaction lost a serialization race. The stream
+// consumer retries such failures without spending its retry budget, so an
+// outage or a deployment mistake never dead-letters a stream. Errors about
+// the record's data (classes 22 and 23) are not transient.
+func IsTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var connectErr *pgconn.ConnectError
+	if errors.As(err, &connectErr) { // no connection at all, whatever the server said
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code[:2] {
+		case "08", // connection exception
+			"28", // invalid authorization (password, role)
+			"3D", // invalid catalog name: the database does not exist
+			"40", // transaction rollback: serialization failure, deadlock
+			"42", // undefined table/column, insufficient privilege: schema not migrated
+			"53", // insufficient resources (too many connections, disk full)
+			"57", // operator intervention: admin shutdown, cannot connect now, query canceled
+			"58": // system error (I/O)
+			return true
+		}
+		return pgErr.Code == "55P03" // lock_not_available
+	}
+	if pgconn.Timeout(err) || pgconn.SafeToRetry(err) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
 
 // nullString maps "" to NULL.
 func nullString(s string) *string {

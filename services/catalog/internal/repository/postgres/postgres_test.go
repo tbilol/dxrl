@@ -3,13 +3,18 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"io/fs"
 	"math"
+	"net"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v5"
 	commonv1 "github.com/tbilol/dxrl/gen/go/common/v1"
 	eventsv1 "github.com/tbilol/dxrl/gen/go/events/v1"
@@ -17,6 +22,7 @@ import (
 	"github.com/tbilol/dxrl/services/catalog/internal/domain"
 	"github.com/tbilol/dxrl/services/catalog/internal/events"
 	"github.com/tbilol/dxrl/services/catalog/internal/service"
+	"github.com/tbilol/dxrl/services/catalog/migrations"
 )
 
 var (
@@ -410,4 +416,186 @@ func TestEnqueueOutbox(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO outbox`).WithArgs(m.ID, m.Topic, m.Key, m.Value, m.Headers, m.EventType, m.CreatedAt).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	run(t, store, func(q service.Queries) error { return q.EnqueueOutbox(ctx, m) })
+}
+
+func TestSaveRemaining(t *testing.T) {
+	mock, store := newMock(t)
+	now := time.Now().UTC()
+	l := domain.Listing{ID: uuid.New(), RemainingGrams: 0, Status: domain.StatusSoldOut, Version: 3, UpdatedAt: now,
+		ListingFields: domain.ListingFields{Notes: "not written"}}
+	for _, n := range []int64{1, 0} {
+		mock.ExpectExec(`^\s*UPDATE listings SET remaining_grams = \$2, status = \$3, version = \$4, updated_at = \$5 WHERE id = \$1$`).
+			WithArgs(l.ID, int64(0), "SOLD_OUT", int64(3), now).WillReturnResult(pgxmock.NewResult("UPDATE", n))
+	}
+	_ = store.Run(ctx, func(q service.Queries) error {
+		if err := q.SaveRemaining(ctx, l); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.SaveRemaining(ctx, l); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("no row updated: err = %v", err)
+		}
+		return nil
+	})
+}
+
+func TestMarkProcessed(t *testing.T) {
+	mock, store := newMock(t)
+	e := domain.ProcessedEvent{EventID: uuid.New(), Topic: events.TopicTransaction,
+		EventType: "agrogram.events.v1.TransactionCreated", AggregateID: uuid.New(), AggregateVersion: 1, ProcessedAt: time.Now()}
+	for _, n := range []int64{1, 0} {
+		mock.ExpectExec(`INSERT INTO processed_events .* ON CONFLICT \(event_id\) DO NOTHING`).
+			WithArgs(e.EventID, e.Topic, e.EventType, e.AggregateID, e.AggregateVersion, e.ProcessedAt).
+			WillReturnResult(pgxmock.NewResult("INSERT", n))
+	}
+	run(t, store, func(q service.Queries) error {
+		if fresh, err := q.MarkProcessed(ctx, e); err != nil || !fresh {
+			t.Fatalf("first: %v, %v", fresh, err)
+		}
+		if fresh, err := q.MarkProcessed(ctx, e); err != nil || fresh {
+			t.Fatalf("duplicate: %v, %v", fresh, err)
+		}
+		return nil
+	})
+}
+
+func TestPurgeProcessedEvents(t *testing.T) {
+	mock, store := newMock(t)
+	cutoff := time.Now()
+	mock.ExpectExec(`DELETE FROM processed_events WHERE processed_at < \$1`).WithArgs(cutoff).
+		WillReturnResult(pgxmock.NewResult("DELETE", 4))
+	if n, err := store.PurgeProcessedEvents(ctx, cutoff); err != nil || n != 4 {
+		t.Fatalf("purged %d, %v", n, err)
+	}
+}
+
+var transactionColN = []string{"transaction_id", "listing_id", "farmer_id", "reseller_id", "quantity_grams", "state",
+	"version", "created_at", "recorded_at", "updated_at"}
+
+func TestListingTransactionQueries(t *testing.T) {
+	mock, store := newMock(t)
+	created := time.Date(2026, 9, 25, 15, 0, 0, 0, tashkent)
+	tx := domain.ListingTransaction{ID: uuid.New(), ListingID: uuid.New(), FarmerID: uuid.New(), ResellerID: uuid.New(),
+		QuantityGrams: 5_000_000, State: domain.StatePaymentHeld, Version: 2, CreatedAt: created.UTC(),
+		RecordedAt: created.Add(time.Minute).UTC(), UpdatedAt: created.Add(2 * time.Minute).UTC()}
+	byID := `FROM listing_transactions WHERE transaction_id = \$1$`
+	mock.ExpectQuery(byID).WithArgs(tx.ID).WillReturnRows(mock.NewRows(transactionColN).AddRow(tx.ID, tx.ListingID,
+		tx.FarmerID, tx.ResellerID, int64(5_000_000), "PAYMENT_HELD", int64(2), created, created.Add(time.Minute),
+		created.Add(2*time.Minute)))
+	mock.ExpectQuery(byID).WithArgs(tx.ID).WillReturnRows(mock.NewRows(transactionColN))
+	mock.ExpectQuery(byID).WithArgs(tx.ID).WillReturnRows(mock.NewRows(transactionColN).AddRow(tx.ID, tx.ListingID,
+		tx.FarmerID, tx.ResellerID, int64(5_000_000), "CANCELLED", int64(2), created, created, created))
+	mock.ExpectExec(`INSERT INTO listing_transactions \(transaction_id, listing_id, farmer_id, reseller_id, quantity_grams, state, version,\s+created_at, recorded_at, updated_at\)`).
+		WithArgs(tx.ID, tx.ListingID, tx.FarmerID, tx.ResellerID, int64(5_000_000), "PAYMENT_HELD", int64(2), tx.CreatedAt,
+			tx.RecordedAt, tx.UpdatedAt).WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	for _, n := range []int64{1, 0} {
+		mock.ExpectExec(`UPDATE listing_transactions SET state = \$2, version = \$3, updated_at = \$4\s+WHERE transaction_id = \$1 AND version < \$3`).
+			WithArgs(tx.ID, "PAYMENT_HELD", int64(2), tx.UpdatedAt).WillReturnResult(pgxmock.NewResult("UPDATE", n))
+	}
+	mock.ExpectQuery(`SELECT COALESCE\(sum\(quantity_grams\), 0\)::bigint FROM listing_transactions WHERE listing_id = \$1`).
+		WithArgs(tx.ListingID).WillReturnRows(mock.NewRows([]string{"sum"}).AddRow(int64(7_000_000)))
+	mock.ExpectQuery(`SELECT EXISTS \(SELECT 1 FROM listing_transactions WHERE listing_id = \$1 AND \(farmer_id = \$2 OR reseller_id = \$2\)\)`).
+		WithArgs(tx.ListingID, tx.ResellerID).WillReturnRows(mock.NewRows([]string{"exists"}).AddRow(true))
+
+	run(t, store, func(q service.Queries) error {
+		got, err := q.GetListingTransaction(ctx, tx.ID)
+		if err != nil || got != tx || got.CreatedAt.Location() != time.UTC {
+			t.Fatalf("read =\n%+v, %v\nwant\n%+v", got, err, tx)
+		}
+		if _, err := q.GetListingTransaction(ctx, tx.ID); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("missing: err = %v", err)
+		}
+		if _, err := q.GetListingTransaction(ctx, tx.ID); err == nil || !strings.Contains(err.Error(), "CANCELLED") {
+			t.Fatalf("unknown state: err = %v", err)
+		}
+		if err := q.InsertListingTransaction(ctx, tx); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := q.UpdateListingTransaction(ctx, tx); err != nil || !ok {
+			t.Fatalf("newer version: %v, %v", ok, err)
+		}
+		if ok, err := q.UpdateListingTransaction(ctx, tx); err != nil || ok {
+			t.Fatalf("stale version: %v, %v", ok, err)
+		}
+		if grams, err := q.CommittedGrams(ctx, tx.ListingID); err != nil || grams != 7_000_000 {
+			t.Fatalf("committed = %d, %v", grams, err)
+		}
+		if party, err := q.IsTransactionParty(ctx, tx.ListingID, tx.ResellerID); err != nil || !party {
+			t.Fatalf("party = %v, %v", party, err)
+		}
+		return nil
+	})
+	unknown := tx
+	unknown.State = eventsv1.TransactionState(42)
+	if err := (&queries{db: nil}).InsertListingTransaction(ctx, unknown); err == nil {
+		t.Fatal("a state that cannot be stored must be an error")
+	}
+	if _, err := (&queries{db: nil}).UpdateListingTransaction(ctx, unknown); err == nil {
+		t.Fatal("a state that cannot be stored must be an error")
+	}
+}
+
+// TestTransactionStatesMatchTheProtoAndTheMigration: every defined non-zero
+// TransactionState can be stored, and migration 00003's CHECK lists exactly
+// the stored names.
+func TestTransactionStatesMatchTheProtoAndTheMigration(t *testing.T) {
+	sql, err := fs.ReadFile(migrations.FS, "00003_listing_transactions.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := string(sql)[strings.Index(string(sql), "state IN ("):]
+	check = check[:strings.Index(check, ")")]
+	if len(transactionStates.toDB) != len(eventsv1.TransactionState_name)-1 {
+		t.Fatalf("%d states mapped, the proto defines %d", len(transactionStates.toDB), len(eventsv1.TransactionState_name)-1)
+	}
+	for v, name := range eventsv1.TransactionState_name {
+		if v == 0 {
+			continue
+		}
+		text, err := transactionStates.text(eventsv1.TransactionState(v))
+		if err != nil || text != strings.TrimPrefix(name, "TRANSACTION_STATE_") {
+			t.Errorf("%s stored as %q, %v", name, text, err)
+		}
+		if !strings.Contains(check, "'"+text+"'") {
+			t.Errorf("the CHECK of listing_transactions.state does not allow %q", text)
+		}
+	}
+	if n := strings.Count(check, "'"); n != 2*len(transactionStates.toDB) {
+		t.Errorf("the CHECK lists %d names, want %d", n/2, len(transactionStates.toDB))
+	}
+}
+
+func TestIsTransient(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		want bool
+	}{
+		"nil":                {nil, false},
+		"deadline":           {fmt.Errorf("apply: %w", context.DeadlineExceeded), true},
+		"canceled":           {context.Canceled, true},
+		"admin shutdown":     {&pgconn.PgError{Code: "57P01"}, true},
+		"cannot connect now": {&pgconn.PgError{Code: "57P03"}, true},
+		"connection failure": {&pgconn.PgError{Code: "08006"}, true},
+		"too many conns":     {&pgconn.PgError{Code: "53300"}, true},
+		"deadlock":           {fmt.Errorf("tx: %w", &pgconn.PgError{Code: "40P01"}), true},
+		"serialization":      {&pgconn.PgError{Code: "40001"}, true},
+		"lock not available": {&pgconn.PgError{Code: "55P03"}, true},
+		"not migrated":       {fmt.Errorf("apply: %w", &pgconn.PgError{Code: "42P01"}), true},
+		"no privilege":       {&pgconn.PgError{Code: "42501"}, true},
+		"bad password":       {&pgconn.PgError{Code: "28P01"}, true},
+		"no database":        {&pgconn.PgError{Code: "3D000"}, true},
+		"disk":               {&pgconn.PgError{Code: "58030"}, true},
+		"network":            {&net.OpError{Op: "dial", Err: errors.New("connection refused")}, true},
+		"eof":                {fmt.Errorf("read: %w", io.ErrUnexpectedEOF), true},
+		"check violation":    {&pgconn.PgError{Code: "23514"}, false},
+		"unique violation":   {&pgconn.PgError{Code: "23505"}, false},
+		"foreign key":        {fmt.Errorf("insert listing transaction: %w", &pgconn.PgError{Code: "23503"}), false},
+		"out of range":       {&pgconn.PgError{Code: "22003"}, false},
+		"inconsistent event": {fmt.Errorf("apply: %w", domain.ErrInconsistentEvent), false},
+		"other":              {errors.New("unknown transaction state in database"), false},
+	}
+	for name, tc := range cases {
+		if got := IsTransient(tc.err); got != tc.want {
+			t.Errorf("%s: IsTransient = %v, want %v", name, got, tc.want)
+		}
+	}
 }

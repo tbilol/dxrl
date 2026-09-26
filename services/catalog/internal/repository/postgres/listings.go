@@ -219,6 +219,23 @@ WHERE id = $1`, args...)
 	return nil
 }
 
+func (q *queries) SaveRemaining(ctx context.Context, l domain.Listing) error {
+	status, err := listingStatuses.text(l.Status)
+	if err != nil {
+		return err
+	}
+	tag, err := q.db.Exec(ctx, `
+UPDATE listings SET remaining_grams = $2, status = $3, version = $4, updated_at = $5 WHERE id = $1`,
+		l.ID, l.RemainingGrams, status, l.Version, l.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("save remaining quantity: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
 func (q *queries) FindListings(ctx context.Context, lq domain.ListingQuery) ([]domain.Hit, error) {
 	sql, args, err := findListingsSQL(lq)
 	if err != nil {

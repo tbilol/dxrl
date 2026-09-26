@@ -203,7 +203,7 @@ func listingProto(l domain.Listing) *catalogv1.Listing {
 		OwnerId:           l.OwnerID.String(),
 		Product:           l.Product,
 		Quantity:          l.Quantity.Proto(),
-		RemainingQuantity: l.Remaining().Proto(), // TODO(phase3): equals quantity until escrow commitments are tracked
+		RemainingQuantity: l.Remaining().Proto(), // quantity minus the escrow commitments from the transaction stream
 		Price:             l.Price.Proto(),
 		Phone:             l.Phone,
 		Address:           l.Address.Proto(),

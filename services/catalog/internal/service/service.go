@@ -1,6 +1,7 @@
 // Package service is catalog's business logic: the listings of both boards
-// (create, read, update, delete), browsing and search, and the product
-// reference data.
+// (create, read, update, delete), browsing and search, the product reference
+// data, and the escrow commitments from order-escrow's transaction stream
+// (remaining quantity, SOLD_OUT, transaction-party visibility).
 //
 // catalog owns listings and product types only. A listing carries its
 // owner's user id; names, avatars, badges and ratings are profile-social's,
@@ -55,9 +56,32 @@ type Queries interface {
 	// version and timestamps (never views_count), and doc unless it is nil
 	// (the stored search document stays).
 	SaveListing(ctx context.Context, l domain.Listing, doc *domain.SearchDocument) error
+	// SaveRemaining writes only l's remaining quantity, status, version and
+	// updated_at (a new escrow commitment); the owner fields, views and the
+	// search document stay.
+	SaveRemaining(ctx context.Context, l domain.Listing) error
 	// FindListings runs a listing query and returns up to q.Limit hits in
 	// the query's order, strictly after q.After.
 	FindListings(ctx context.Context, q domain.ListingQuery) ([]domain.Hit, error)
+
+	// CommittedGrams is the quantity escrow transactions have committed of
+	// the listing: the sum of its transactions' quantities (0 without any).
+	CommittedGrams(ctx context.Context, listingID uuid.UUID) (int64, error)
+	// IsTransactionParty reports whether user is the farmer or the reseller
+	// of an escrow transaction on the listing.
+	IsTransactionParty(ctx context.Context, listingID, user uuid.UUID) (bool, error)
+
+	// MarkProcessed stores an inbox row; false when the event id is known.
+	MarkProcessed(ctx context.Context, e domain.ProcessedEvent) (bool, error)
+	// GetListingTransaction returns the projection of escrow transaction id.
+	GetListingTransaction(ctx context.Context, id uuid.UUID) (domain.ListingTransaction, error)
+	// InsertListingTransaction stores the projection of a transaction seen
+	// for the first time: its commitment.
+	InsertListingTransaction(ctx context.Context, t domain.ListingTransaction) error
+	// UpdateListingTransaction writes t's state, version and updated_at if
+	// t.Version is newer than the stored version, and reports whether it
+	// did. The terms are never written.
+	UpdateListingTransaction(ctx context.Context, t domain.ListingTransaction) (bool, error)
 
 	// GetProductType returns the reference data of t.
 	GetProductType(ctx context.Context, t commonv1.ProductType) (domain.ProductType, error)

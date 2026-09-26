@@ -66,7 +66,7 @@ tidy: gen-check ## go mod tidy
 build: gen-check ## Build bin/catalog
 	$(GO) build -trimpath -o $(BIN) ./cmd/catalog
 
-run: gen-check ## Run the service locally: gRPC, HTTP health, outbox relay, view counter (loads ./.env)
+run: gen-check ## Run the service locally: gRPC, HTTP health, outbox relay, transaction consumer, view counter (loads ./.env)
 	$(LOAD_ENV) $(GO) run ./cmd/catalog serve
 
 test: gen-check ## Unit tests (no infrastructure needed)

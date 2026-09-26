@@ -13,11 +13,15 @@
 # context `..` (= back/) and the passwords from CATALOG_DB_PASSWORD and
 # REDIS_PASSWORD, which that .env already defines.
 #
-# catalog calls no other service and consumes no stream: it only publishes
-# the listing stream (agrogram.catalog.listing.v1) through its outbox. It
-# therefore depends on no other service container; profile-social reaches it
-# at catalog:50051, and order-escrow will (Phase 3). To run it with identity,
-# auth-gateway and profile-social, add their compose files too (README.md).
+# catalog calls no other service. It publishes the listing stream
+# (agrogram.catalog.listing.v1) through its outbox and consumes order-escrow's
+# transaction stream (agrogram.orderescrow.transaction.v1, consumer group
+# `catalog`, dead letters to agrogram.catalog.deadletter.v1) from Kafka;
+# kafka-init creates all three topics, and the consumer settings keep their
+# defaults (README.md, "Configuration"). It therefore depends on no other
+# service container; profile-social and order-escrow reach it at
+# catalog:50051. To run it with the other services, add their compose files
+# too (README.md).
 #
 # Needs `make gen` in back/services/catalog beforehand (the image compiles
 # against back/gen/go).

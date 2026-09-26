@@ -30,6 +30,13 @@ const (
 
 	UnitKilogram = commonv1.MassUnit_MASS_UNIT_KILOGRAM
 	UnitTonne    = commonv1.MassUnit_MASS_UNIT_TONNE
+
+	StateAwaitingPayment  = eventsv1.TransactionState_TRANSACTION_STATE_AWAITING_PAYMENT
+	StatePaymentHeld      = eventsv1.TransactionState_TRANSACTION_STATE_PAYMENT_HELD
+	StateReceiptSubmitted = eventsv1.TransactionState_TRANSACTION_STATE_RECEIPT_SUBMITTED
+	StateHandedOver       = eventsv1.TransactionState_TRANSACTION_STATE_HANDED_OVER
+	StateReceived         = eventsv1.TransactionState_TRANSACTION_STATE_RECEIVED
+	StateCompleted        = eventsv1.TransactionState_TRANSACTION_STATE_COMPLETED
 )
 
 // CurrencyUZS is the currency of every listing price (catalog.proto:
@@ -38,6 +45,13 @@ const CurrencyUZS = "UZS"
 
 // ErrNotFound is returned by repositories when a row does not exist.
 var ErrNotFound = errors.New("not found")
+
+// ErrInconsistentEvent is wrapped by the service when a consumed event
+// contradicts catalog's data or itself: the listing it names does not exist,
+// has another kind or another owner, or the transaction's terms differ from
+// an earlier event of it. Retrying cannot fix such a record, so the consumer
+// dead-letters it at once.
+var ErrInconsistentEvent = errors.New("inconsistent event")
 
 // Field names of UpdateListing's update_mask (catalog.proto restricts the
 // mask to these).
@@ -121,16 +135,18 @@ type Listing struct {
 	ListingFields
 
 	// RemainingGrams is the quantity not yet committed to escrow
-	// transactions. TODO(phase3): always Quantity.Grams until catalog
-	// consumes order-escrow's transaction stream (SOLD_OUT comes from there
-	// too).
+	// transactions: Quantity.Grams minus the quantities of every transaction
+	// on the listing that catalog has seen on order-escrow's transaction
+	// stream, never below 0. An ACTIVE listing becomes SOLD_OUT when it
+	// reaches 0.
 	RemainingGrams int64
 	Status         eventsv1.ListingStatus
 	// ViewsCount is how many times non-owners opened the listing. It changes
 	// without bumping Version.
 	ViewsCount int64
 	// Version is the optimistic-concurrency version: 1 on creation, + 1 on
-	// every update and on deletion.
+	// every update, on deletion and whenever a new escrow transaction changes
+	// the remaining quantity or the status.
 	Version int64
 	// CreateRequestID is CreateListing's idempotency key.
 	CreateRequestID uuid.UUID
@@ -301,4 +317,89 @@ func (q Quotas) Limit(kind commonv1.ListingKind, premium bool) (limit int, plan 
 		return q.BuyRequestPremium, PlanPremium
 	}
 	return q.BuyRequestDefault, PlanDefault
+}
+
+// ListingTransaction is catalog's projection of one escrow transaction on a
+// listing (table listing_transactions), kept from order-escrow's transaction
+// stream. Its quantity is committed from the first event of it catalog sees,
+// for good: the contract has no cancel or expiry yet.
+type ListingTransaction struct {
+	ID        uuid.UUID // the transaction id
+	ListingID uuid.UUID
+	// FarmerID and ResellerID are the parties: the listing's owner (the
+	// farmer of an offer, the reseller of a buy-request) and the counterparty
+	// who started the transaction.
+	FarmerID   uuid.UUID
+	ResellerID uuid.UUID
+	// QuantityGrams is the agreed quantity: what the transaction commits of
+	// the listing. The terms (listing, parties, quantity) never change.
+	QuantityGrams int64
+	// State and Version are those of the newest snapshot applied.
+	State   eventsv1.TransactionState
+	Version int64
+	// CreatedAt is when order-escrow created the transaction, RecordedAt when
+	// catalog first saw it (the commitment), UpdatedAt when catalog last
+	// applied an event of it.
+	CreatedAt  time.Time
+	RecordedAt time.Time
+	UpdatedAt  time.Time
+}
+
+// TransactionUpdate is one decoded record of order-escrow's transaction
+// stream: the event's identity and the transaction terms and state its
+// snapshot carries. Every event type carries all of them (event-carried
+// state transfer).
+type TransactionUpdate struct {
+	EventID    uuid.UUID
+	EventType  string // EventMetadata.event_type
+	Topic      string
+	OccurredAt time.Time
+	// Version is the snapshot's version (= EventMetadata.aggregate_version).
+	Version int64
+
+	TransactionID uuid.UUID
+	ListingID     uuid.UUID
+	ListingKind   commonv1.ListingKind
+	FarmerID      uuid.UUID
+	ResellerID    uuid.UUID
+	QuantityGrams int64
+	State         eventsv1.TransactionState
+	CreatedAt     time.Time // TransactionSnapshot.created_at
+}
+
+// ApplyOutcome is what processing one consumed transaction event did.
+type ApplyOutcome int8
+
+const (
+	// Applied: the event changed the projection. The first event of a
+	// transaction committed its quantity; a later one with a newer version
+	// updated its state.
+	Applied ApplyOutcome = iota + 1
+	// Stale: the event was new but changed nothing: its version was not newer
+	// than the stored one (an older event after a newer one).
+	Stale
+	// Duplicate: the event id was processed before; nothing changed.
+	Duplicate
+)
+
+func (o ApplyOutcome) String() string {
+	switch o {
+	case Applied:
+		return "applied"
+	case Stale:
+		return "stale"
+	case Duplicate:
+		return "duplicate"
+	}
+	return "unknown"
+}
+
+// ProcessedEvent is a consumer inbox row (de-duplication on event id).
+type ProcessedEvent struct {
+	EventID          uuid.UUID
+	Topic            string
+	EventType        string
+	AggregateID      uuid.UUID
+	AggregateVersion int64
+	ProcessedAt      time.Time
 }

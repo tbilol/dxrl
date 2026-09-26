@@ -31,15 +31,15 @@ import (
 )
 
 // serve runs catalog until SIGINT/SIGTERM, then shuts down gracefully:
-// health NOT_SERVING, drain gRPC, stop HTTP, stop the relay and the view
-// counter (which writes what it has queued), flush the Kafka producer, close
-// Redis and the Postgres pool.
+// health NOT_SERVING, drain gRPC, stop HTTP, stop the transaction-stream
+// consumer (committing what it processed), the relay and the view counter
+// (which writes what it has queued), leave the consumer group, flush the
+// Kafka producer, close Redis and the Postgres pool.
 //
-// catalog calls no other service and consumes no stream. TODO(phase3):
-// consume order-escrow's transaction stream (agrogram.orderescrow.transaction.v1)
-// for the remaining quantity, SOLD_OUT and transaction-party visibility,
-// with an inbox table and dead letters to agrogram.catalog.deadletter.v1 like
-// profile-social's consumer.
+// catalog calls no other service. It consumes one stream, order-escrow's
+// transaction stream (the escrow commitments behind the remaining quantity,
+// SOLD_OUT and transaction-party visibility), and publishes the listing
+// stream through its outbox.
 func serve(ctx context.Context) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -98,8 +98,14 @@ func serve(ctx context.Context) error {
 		return fmt.Errorf("protovalidate: %w", err)
 	}
 
-	// Kafka (optional): the outbox relay publishing the listing stream.
-	var producer *kgo.Client
+	// Kafka (optional): the outbox relay publishing the listing stream and the
+	// consumer of order-escrow's transaction stream. The producer also
+	// publishes the consumer's dead letters; the consumer commits offsets
+	// itself.
+	var (
+		producer *kgo.Client
+		consumer *kgo.Client
+	)
 	if len(cfg.KafkaBrokers) > 0 {
 		producer, err = kgo.NewClient(
 			kgo.SeedBrokers(cfg.KafkaBrokers...),
@@ -109,8 +115,24 @@ func serve(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("kafka producer: %w", err)
 		}
+		consumer, err = kgo.NewClient(
+			kgo.SeedBrokers(cfg.KafkaBrokers...),
+			kgo.ClientID(cfg.KafkaClientID),
+			kgo.ConsumerGroup(cfg.KafkaConsumerGroup),
+			kgo.ConsumeTopics(cfg.KafkaTransactionTopic),
+			kgo.DisableAutoCommit(), // offsets are committed after processing (events.Consumer)
+			// A new group starts at the beginning of the topic, which backfills
+			// the commitments of every transaction still retained in it.
+			kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+		)
+		if err != nil {
+			producer.Close()
+			return fmt.Errorf("kafka consumer: %w", err)
+		}
 	} else {
-		log.Warn("CATALOG_KAFKA_BROKERS is empty: the outbox relay is disabled; ListingCreated events stay in the outbox table")
+		log.Warn("CATALOG_KAFKA_BROKERS is empty: the outbox relay and the transaction-stream consumer are disabled; " +
+			"ListingCreated events stay in the outbox table, escrow transactions do not reduce remaining quantities " +
+			"(no listing becomes SOLD_OUT) and transaction parties cannot read listings that are not ACTIVE")
 	}
 
 	grpcHealth := grpchealth.NewServer()
@@ -125,13 +147,13 @@ func serve(ctx context.Context) error {
 	// Listen first, so a taken port fails before background work starts.
 	grpcLis, err := net.Listen("tcp", cfg.GRPCAddr)
 	if err != nil {
-		closeProducer(context.Background(), producer, log)
+		closeKafka(context.Background(), producer, consumer, log)
 		return fmt.Errorf("grpc listen: %w", err)
 	}
 	httpLis, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
 		grpcLis.Close()
-		closeProducer(context.Background(), producer, log)
+		closeKafka(context.Background(), producer, consumer, log)
 		return fmt.Errorf("http listen: %w", err)
 	}
 
@@ -149,6 +171,19 @@ func serve(ctx context.Context) error {
 			Retention:  cfg.OutboxRetention,
 		}, log)
 		bg.Go(func() { relay.Run(bgCtx) })
+		transactions := events.NewConsumer(consumer, producer, map[string]events.RecordHandler{
+			cfg.KafkaTransactionTopic: events.NewTransactionHandler(svc, validator, log),
+		}, store, events.ConsumerConfig{
+			Group:          cfg.KafkaConsumerGroup,
+			MaxAttempts:    cfg.ConsumerMaxAttempts,
+			RetryBackoff:   cfg.ConsumerRetryBackoff,
+			MaxBackoff:     cfg.ConsumerRetryBackoffMax,
+			HandleTimeout:  cfg.ConsumerHandleTimeout,
+			BatchSize:      cfg.ConsumerBatchSize,
+			Transient:      postgres.IsTransient,
+			InboxRetention: cfg.InboxRetention,
+		}, log)
+		bg.Go(func() { transactions.Run(bgCtx) })
 	}
 
 	errc := make(chan error, 2)
@@ -160,7 +195,8 @@ func serve(ctx context.Context) error {
 	}()
 	log.Info("catalog started", "grpc_addr", grpcLis.Addr().String(), "http_addr", httpLis.Addr().String(),
 		"grpc_reflection", cfg.GRPCReflection, "rate_limit", limiter != nil, "view_dedup", dedup != nil,
-		"kafka", producer != nil, "quotas", cfg.Quotas())
+		"kafka", producer != nil, "consumer_group", cfg.KafkaConsumerGroup, "transaction_topic", cfg.KafkaTransactionTopic,
+		"quotas", cfg.Quotas())
 
 	var runErr error
 	select {
@@ -179,20 +215,23 @@ func serve(ctx context.Context) error {
 	}
 	stopBG() // the view counter writes what it has queued before it returns
 	waitGroup(shutdownCtx, &bg, log)
-	closeProducer(shutdownCtx, producer, log)
+	closeKafka(shutdownCtx, producer, consumer, log)
 	log.Info("catalog stopped")
 	return runErr
 }
 
-// closeProducer flushes and closes the Kafka producer (may be nil).
-func closeProducer(ctx context.Context, producer *kgo.Client, log *slog.Logger) {
-	if producer == nil {
-		return
+// closeKafka leaves the consumer group (the consumer has committed what it
+// processed) and flushes and closes the producer. Both may be nil.
+func closeKafka(ctx context.Context, producer, consumer *kgo.Client, log *slog.Logger) {
+	if consumer != nil {
+		consumer.Close()
 	}
-	if err := producer.Flush(ctx); err != nil {
-		log.Warn("kafka flush", "error", err)
+	if producer != nil {
+		if err := producer.Flush(ctx); err != nil {
+			log.Warn("kafka flush", "error", err)
+		}
+		producer.Close()
 	}
-	producer.Close()
 }
 
 func waitGroup(ctx context.Context, wg *sync.WaitGroup, log *slog.Logger) {

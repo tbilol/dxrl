@@ -67,6 +67,15 @@ var (
 		domain.StatusBlocked: "BLOCKED",
 		domain.StatusDeleted: "DELETED",
 	})
+	// transactionStates: listing_transactions.state.
+	transactionStates = newEnumMap("transaction state", map[eventsv1.TransactionState]string{
+		domain.StateAwaitingPayment:  "AWAITING_PAYMENT",
+		domain.StatePaymentHeld:      "PAYMENT_HELD",
+		domain.StateReceiptSubmitted: "RECEIPT_SUBMITTED",
+		domain.StateHandedOver:       "HANDED_OVER",
+		domain.StateReceived:         "RECEIVED",
+		domain.StateCompleted:        "COMPLETED",
+	})
 	// massUnits: MASS_UNIT_UNSPECIFIED (a quantity's "pick a unit") is NULL.
 	massUnits = newEnumMap("mass unit", map[commonv1.MassUnit]string{
 		domain.UnitKilogram: "KILOGRAM",
