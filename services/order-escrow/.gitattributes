@@ -1,0 +1,4 @@
+# The Gradle wrapper must keep its line endings and binary form on every OS.
+/gradlew        text eol=lf
+*.bat           text eol=crlf
+*.jar           binary

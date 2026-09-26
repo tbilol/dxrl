@@ -1,0 +1,90 @@
+# order-escrow on top of the local infrastructure stack.
+#
+# Always used together with back/deploy/docker-compose.yml, which defines
+# postgres, redis, kafka, kafka-init and the `agrogram` network. From the
+# directory that contains back/:
+#
+#   docker compose -f back/deploy/docker-compose.yml -f back/services/order-escrow/compose.yaml \
+#     up -d --build --wait order-escrow
+#
+# (or `make compose-up` in back/services/order-escrow). With several -f files,
+# Compose resolves relative paths against the FIRST file's directory
+# (back/deploy/) and reads back/deploy/.env for interpolation; hence the build
+# context `..` (= back/) and the password from ORDER_ESCROW_DB_PASSWORD, which
+# that .env already defines.
+#
+# order-escrow publishes the transaction stream (agrogram.orderescrow.transaction.v1)
+# through its outbox and consumes no stream. CreateTransaction calls catalog at
+# catalog:50051; add catalog's compose file to run both (README.md). There is
+# no depends_on on catalog, so this file also works without it: the client is
+# lazy and CreateTransaction answers DEPENDENCY_UNAVAILABLE until catalog runs.
+#
+# Needs `make gen` in back/services/order-escrow beforehand (the image compiles
+# against back/gen/java).
+
+x-order-escrow-image: &order-escrow-image
+  image: agrogram/order-escrow:dev
+  build:
+    context: ..
+    dockerfile: services/order-escrow/Dockerfile
+
+x-order-escrow-env: &order-escrow-env
+  # In-network addresses; the password comes from back/deploy/.env.
+  ORDER_ESCROW_DATABASE_URL: postgres://order_escrow:${ORDER_ESCROW_DB_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}@postgres:5432/order_escrow?sslmode=disable
+  ORDER_ESCROW_KAFKA_BROKERS: kafka:9092
+  ORDER_ESCROW_CATALOG_ADDR: ${ORDER_ESCROW_CATALOG_ADDR:-catalog:50051}
+  ORDER_ESCROW_GRPC_ADDR: ":50051"
+  ORDER_ESCROW_HTTP_ADDR: ":8081"
+  ORDER_ESCROW_LOG_FORMAT: json
+  ORDER_ESCROW_LOG_LEVEL: ${ORDER_ESCROW_LOG_LEVEL:-info}
+  # Local stack only: lets grpcurl discover the API. Keep it off elsewhere.
+  ORDER_ESCROW_GRPC_REFLECTION: ${ORDER_ESCROW_GRPC_REFLECTION:-true}
+  # STUB TODO(bonus): placeholder points on completion; 0 publishes no BonusAwarded.
+  ORDER_ESCROW_BONUS_PLACEHOLDER_POINTS: ${ORDER_ESCROW_BONUS_PLACEHOLDER_POINTS:-1}
+
+services:
+  # One-shot: applies the migrations, then exits 0; order-escrow waits for it.
+  order-escrow-migrate:
+    <<: *order-escrow-image
+    command: ["migrate", "up"]
+    restart: "no"
+    environment: *order-escrow-env
+    networks: [agrogram]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The image HEALTHCHECK probes the HTTP server, which `migrate` never starts.
+    healthcheck:
+      disable: true
+
+  order-escrow:
+    <<: *order-escrow-image
+    restart: unless-stopped
+    environment: *order-escrow-env
+    networks: [agrogram]
+    depends_on:
+      order-escrow-migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    ports:
+      # gRPC and health on the host, loopback only (identity uses 15051/18051,
+      # auth-gateway 15052/18052, profile-social 15053/18053, catalog 15054/18054).
+      - "127.0.0.1:${ORDER_ESCROW_GRPC_PORT:-15055}:50051"
+      - "127.0.0.1:${ORDER_ESCROW_HTTP_PORT:-18055}:8081"
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "java", "-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-Xmx32m", "-jar",
+             "/app/order-escrow.jar", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+      start_interval: 2s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

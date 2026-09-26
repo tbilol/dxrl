@@ -1,0 +1,41 @@
+# Fixed settings of order-escrow. Everything that varies between environments
+# comes from ORDER_ESCROW_* environment variables (see README.md and
+# .env.example): ServiceConfig turns them into the datasource, HTTP address,
+# logging and shutdown properties below the ones set here.
+
+spring:
+  application:
+    name: order-escrow
+  main:
+    banner-mode: off
+  datasource:
+    hikari:
+      pool-name: order-escrow
+      # Start even when Postgres is down; /readyz and the gRPC health service
+      # report it, and requests fail until it is back.
+      initialization-fail-timeout: -1
+      connection-timeout: 5000
+      validation-timeout: 2000
+
+server:
+  shutdown: graceful
+  tomcat:
+    threads:
+      max: 8
+      min-spare: 1
+
+logging:
+  # Text format (ORDER_ESCROW_LOG_FORMAT=text); json uses Spring Boot's ECS
+  # structured format, which carries the same MDC and key/value fields.
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %5p [%t] %logger{36} [%X{request_id:-}] %m %kvp%n%wEx"
+  structured:
+    ecs:
+      service:
+        name: order-escrow
+  level:
+    org.apache.kafka: warn
+    # Reconnect warnings every second while Kafka is down; the relay logs its own backoff.
+    org.apache.kafka.clients.NetworkClient: error
+    io.grpc.netty.shaded: warn
+    com.zaxxer.hikari: warn
