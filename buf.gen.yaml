@@ -1,4 +1,4 @@
-# Code generation for every AGROGRAM service language.
+# Code generation for every AGROGRAM service language (Go and Python).
 #
 # All plugins are BSR *remote* plugins, executed on buf.build, so the buf CLI
 # (itself run from the bufbuild/buf Docker image) is the only tool needed.
@@ -16,9 +16,6 @@ managed:
     # Go import path root. Must match the Go module that will own gen/go.
     - file_option: go_package_prefix
       value: github.com/tbilol/dxrl/gen/go
-    # agrogram.catalog.v1 -> Java package uz.agrogram.catalog.v1
-    - file_option: java_package_prefix
-      value: uz
 
 plugins:
   # Go: auth-gateway, identity, profile-social, catalog, notification,
@@ -30,10 +27,10 @@ plugins:
     out: gen/go
     opt: paths=source_relative
 
-  # Python: agri-calculator, analytics.
+  # Python: agri-calculator.
   # include_imports also emits buf/validate/validate_pb2.py, which generated
   # modules import and which the Python protovalidate package does not ship.
-  # (Go and Java get it from their protovalidate artifacts.)
+  # (Go gets it from its protovalidate artifact.)
   - remote: buf.build/protocolbuffers/python:v36.2
     out: gen/python
     include_imports: true
@@ -42,9 +39,3 @@ plugins:
     include_imports: true
   - remote: buf.build/grpc/python:v1.84.0
     out: gen/python
-
-  # Java: order-escrow.
-  - remote: buf.build/protocolbuffers/java:v36.2
-    out: gen/java
-  - remote: buf.build/grpc/java:v1.84.0
-    out: gen/java
