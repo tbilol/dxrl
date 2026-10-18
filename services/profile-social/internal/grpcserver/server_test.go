@@ -256,9 +256,9 @@ func TestErrorsCarryOneCommonError(t *testing.T) {
 	if e := detail(t, err, codes.InvalidArgument); e.GetReason() != commonv1.ErrorReason_ERROR_REASON_SELF_ACTION_NOT_ALLOWED {
 		t.Fatalf("error = %v", e)
 	}
-	svc.err = apperr.New(commonv1.ErrorReason_ERROR_REASON_ALREADY_RATED, "rated")
+	svc.err = apperr.New(commonv1.ErrorReason_ERROR_REASON_ALREADY_EXISTS, "exists")
 	_, err = client.FollowUser(ctx, req)
-	if e := detail(t, err, codes.AlreadyExists); e.GetReason() != commonv1.ErrorReason_ERROR_REASON_ALREADY_RATED {
+	if e := detail(t, err, codes.AlreadyExists); e.GetReason() != commonv1.ErrorReason_ERROR_REASON_ALREADY_EXISTS {
 		t.Fatalf("error = %v", e)
 	}
 	svc.err = errors.New("postgres: password authentication failed")
