@@ -1,21 +1,16 @@
-// Package events is profile-social's Kafka side: it builds the events
-// profile-social publishes, relays them from the transactional outbox to
-// Kafka, and consumes the streams it projects.
+// Package events is profile-social's Kafka side: it relays the transactional
+// outbox to Kafka and consumes identity's account stream.
 //
-// Published (outbox table -> Relay):
+// Published (outbox table -> Relay): agrogram.profilesocial.profile.v1
+// (ProfileEvent, profile.proto), keyed by the user id. profile-social
+// publishes no event case today (RatingUpdated, the only one, went with
+// ratings); the relay drains rows queued before that and stays for later
+// profile events.
 //
-//   - agrogram.profilesocial.profile.v1: ProfileEvent (profile.proto), keyed
-//     by the user id. Today the only case is RatingUpdated.
-//
-// Consumed (Consumer, one consumer group for both streams, "profilesocial" by
-// default):
+// Consumed (Consumer, consumer group "profilesocial" by default):
 //
 //   - agrogram.identity.account.v1: AccountEvent (account.proto), applied to
 //     the account projection on profiles by AccountHandler.
-//   - agrogram.orderescrow.transaction.v1: TransactionEvent
-//     (transaction.proto). TransactionHandler records a transaction once its
-//     snapshot is COMPLETED (PayoutReleased), which unlocks RateUser for both
-//     parties and counts one deal for each; earlier states are skipped.
 //
 // Records that cannot be processed are published as DeadLetter to
 // agrogram.profilesocial.deadletter.v1 (metadata.proto).
@@ -34,18 +29,15 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
-
-	"github.com/tbilol/dxrl/services/profile-social/internal/domain"
 )
 
 // Kafka conventions (proto/events/v1/metadata.proto).
 const (
-	TopicProfile     = "agrogram.profilesocial.profile.v1"
-	TopicAccount     = "agrogram.identity.account.v1"
-	TopicTransaction = "agrogram.orderescrow.transaction.v1"
-	TopicDeadLetter  = "agrogram.profilesocial.deadletter.v1"
-	ProducerName     = "profile-social"
-	ContentType      = "application/x-protobuf"
+	TopicProfile    = "agrogram.profilesocial.profile.v1"
+	TopicAccount    = "agrogram.identity.account.v1"
+	TopicDeadLetter = "agrogram.profilesocial.deadletter.v1"
+	ProducerName    = "profile-social"
+	ContentType     = "application/x-protobuf"
 
 	HeaderContentType = "content-type"
 	HeaderEventType   = "event-type"
@@ -54,9 +46,6 @@ const (
 	HeaderTraceparent = "traceparent"
 	HeaderTracestate  = "tracestate"
 )
-
-// RatingUpdatedType is EventMetadata.event_type of RatingUpdated.
-var RatingUpdatedType = string(proto.MessageName(&eventsv1.RatingUpdated{}))
 
 // Message is one outbox row: a Kafka record ready to publish.
 type Message struct {
@@ -67,114 +56,6 @@ type Message struct {
 	Headers   map[string]string
 	EventType string
 	CreatedAt time.Time
-}
-
-// ProfileChange describes one ProfileEvent of agrogram.profilesocial.profile.v1.
-type ProfileChange struct {
-	// Profile is the profile right after the event: the envelope snapshot and
-	// EventMetadata.aggregate_version. It needs a display name (the snapshot
-	// requires one), so only created profiles have events.
-	Profile domain.Profile
-	// Event is the concrete event: *eventsv1.RatingUpdated.
-	Event proto.Message
-
-	OccurredAt    time.Time // commit time of the state change
-	CorrelationID string    // x-request-id
-	Traceparent   string
-	Tracestate    string
-	Actor         *commonv1.Actor
-}
-
-// NewProfileEvent builds and validates a ProfileEvent for
-// agrogram.profilesocial.profile.v1, keyed by the user id. event_type is the
-// full name of c.Event.
-func NewProfileEvent(c ProfileChange) (Message, error) {
-	id, err := uuid.NewV7()
-	if err != nil {
-		return Message{}, fmt.Errorf("event id: %w", err)
-	}
-	env := &eventsv1.ProfileEvent{Profile: profileSnapshot(c.Profile, c.OccurredAt)}
-	switch e := c.Event.(type) {
-	case *eventsv1.RatingUpdated:
-		env.Event = &eventsv1.ProfileEvent_RatingUpdated{RatingUpdated: e}
-	case nil:
-		return Message{}, fmt.Errorf("profile event: no event given")
-	default:
-		return Message{}, fmt.Errorf("profile event: %s is not a ProfileEvent case", proto.MessageName(e))
-	}
-	env.Metadata = &eventsv1.EventMetadata{
-		EventId:          id.String(),
-		EventType:        string(proto.MessageName(c.Event)),
-		OccurredAt:       timestamppb.New(c.OccurredAt),
-		Producer:         ProducerName,
-		AggregateType:    commonv1.ResourceType_RESOURCE_TYPE_USER,
-		AggregateId:      c.Profile.ID.String(),
-		AggregateVersion: c.Profile.Version,
-		CorrelationId:    c.CorrelationID,
-		Traceparent:      c.Traceparent,
-		Tracestate:       c.Tracestate,
-		Actor:            c.Actor,
-	}
-	return newMessage(id, TopicProfile, c.Profile.ID.String(), env, env.GetMetadata(), c.OccurredAt)
-}
-
-// profileSnapshot is the ProfileEvent snapshot of p. The Premium badge is
-// evaluated at the event time.
-func profileSnapshot(p domain.Profile, at time.Time) *eventsv1.ProfileSnapshot {
-	s := &eventsv1.ProfileSnapshot{
-		Id:               p.ID.String(),
-		DisplayName:      p.DisplayName,
-		Region:           p.Region,
-		District:         p.District,
-		Rating:           &eventsv1.RatingSummary{Average: p.RatingAverage(), Count: p.RatingCount},
-		DealsCount:       p.DealsCount,
-		FollowerCount:    p.FollowerCount,
-		FollowingCount:   p.FollowingCount,
-		IsVerifiedFarmer: p.Account.IsVerifiedFarmer,
-		IsPremium:        p.Account.PremiumActive(at),
-		Version:          p.Version,
-		CreatedAt:        timestamppb.New(p.CreatedAt),
-		UpdatedAt:        timestamppb.New(p.UpdatedAt),
-	}
-	if p.AvatarMediaID != uuid.Nil {
-		// TODO(media): only the id; media-pipeline fills type, status and URLs.
-		s.Avatar = &commonv1.MediaRef{MediaId: p.AvatarMediaID.String()}
-	}
-	return s
-}
-
-// newMessage validates env, whose header is md, and turns it into an outbox
-// message for topic, keyed by key, with the standard record headers.
-func newMessage(id uuid.UUID, topic, key string, env proto.Message, md *eventsv1.EventMetadata, occurredAt time.Time) (Message, error) {
-	name := env.ProtoReflect().Descriptor().Name()
-	if err := protovalidate.Validate(env); err != nil {
-		return Message{}, fmt.Errorf("invalid %s: %w", name, err)
-	}
-	value, err := proto.Marshal(env)
-	if err != nil {
-		return Message{}, fmt.Errorf("marshal %s: %w", name, err)
-	}
-	headers := map[string]string{
-		HeaderContentType: ContentType,
-		HeaderEventType:   md.GetEventType(),
-		HeaderEventID:     id.String(),
-		HeaderRequestID:   md.GetCorrelationId(),
-	}
-	if tp := md.GetTraceparent(); tp != "" {
-		headers[HeaderTraceparent] = tp
-	}
-	if ts := md.GetTracestate(); ts != "" {
-		headers[HeaderTracestate] = ts
-	}
-	return Message{
-		ID:        id,
-		Topic:     topic,
-		Key:       key,
-		Value:     value,
-		Headers:   headers,
-		EventType: md.GetEventType(),
-		CreatedAt: occurredAt,
-	}, nil
 }
 
 // maxDeadLetterMessage bounds DeadLetter.error.message.

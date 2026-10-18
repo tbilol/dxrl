@@ -25,10 +25,8 @@ type Config struct {
 	RedisURL string `env:"REDIS_URL"`
 
 	// Empty disables the stream consumer and the outbox relay (with a
-	// warning): no account updates are applied, no completed transactions are
-	// recorded (RateUser stays RATING_NOT_ALLOWED) and events accumulate in
-	// the outbox table. The consumer group reads both consumed streams,
-	// identity's account stream and order-escrow's transaction stream, and is
+	// warning): no account updates are applied and events accumulate in the
+	// outbox table. The consumer group reads identity's account stream and is
 	// also DeadLetter.consumer_group.
 	KafkaBrokers       []string `env:"KAFKA_BROKERS" envSeparator:","`
 	KafkaClientID      string   `env:"KAFKA_CLIENT_ID" envDefault:"profile-social"`

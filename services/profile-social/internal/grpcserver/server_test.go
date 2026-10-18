@@ -42,7 +42,6 @@ type stubService struct {
 	page     domain.PageRequest
 	statuses []eventsv1.ListingStatus
 	kind     commonv1.ListingKind
-	ratings  domain.RatingPage
 	listings domain.ListingPage
 }
 
@@ -92,15 +91,6 @@ func (s *stubService) ListFollowers(_ context.Context, p auth.Principal, userID 
 func (s *stubService) ListFollowing(_ context.Context, p auth.Principal, userID string, page domain.PageRequest) (domain.ProfilePage, error) {
 	s.userID, s.page = userID, page
 	return domain.ProfilePage{}, s.answer(p)
-}
-
-func (s *stubService) RateUser(_ context.Context, p auth.Principal, _, _ string, _ int32, _ string) (domain.Rating, error) {
-	return domain.Rating{ID: uuid.New(), Score: 5, CreatedAt: time.Now()}, s.answer(p)
-}
-
-func (s *stubService) ListRatings(_ context.Context, p auth.Principal, userID string, page domain.PageRequest) (domain.RatingPage, error) {
-	s.userID, s.page = userID, page
-	return s.ratings, s.answer(p)
 }
 
 func (s *stubService) ListUserListings(_ context.Context, p auth.Principal, userID string, kind commonv1.ListingKind,
@@ -166,17 +156,13 @@ func TestValidationInterceptor(t *testing.T) {
 		}, "user_id"},
 		"update with an unknown mask path": {func() error {
 			_, err := client.UpdateProfile(ctx, &profilesocialv1.UpdateProfileRequest{
-				Profile: &profilesocialv1.Profile{Id: id}, UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"is_premium"}}})
+				Profile: &profilesocialv1.Profile{Id: id}, UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"follower_count"}}})
 			return err
 		}, "update_mask"},
 		"page too large": {func() error {
 			_, err := client.ListFollowers(ctx, &profilesocialv1.ListFollowersRequest{UserId: id, Page: &commonv1.PageRequest{PageSize: 101}})
 			return err
 		}, "page.page_size"},
-		"score out of range": {func() error {
-			_, err := client.RateUser(ctx, &profilesocialv1.RateUserRequest{RequestId: id, TransactionId: id, Score: 6})
-			return err
-		}, "score"},
 		"unspecified listing status": {func() error {
 			_, err := client.ListUserListings(ctx, &profilesocialv1.ListUserListingsRequest{UserId: id,
 				Statuses: []eventsv1.ListingStatus{eventsv1.ListingStatus_LISTING_STATUS_UNSPECIFIED}})
@@ -205,12 +191,11 @@ func TestPrincipalAndResponseMapping(t *testing.T) {
 	svc := &stubService{prof: domain.Profile{
 		ID: user, Status: domain.ProfileActive, Version: 4, CreatedAt: now, UpdatedAt: now,
 		ProfileFields: domain.ProfileFields{DisplayName: "Nodira", AvatarMediaID: avatar, Region: commonv1.Region_REGION_NAVOIY},
-		RatingCount:   4, RatingSum: 18, FollowerCount: 3, IsFollowedByMe: true, IsPremium: true,
-		Account: domain.Account{IsVerifiedFarmer: true},
+		FollowerCount: 3, IsFollowedByMe: true,
 	}}
 	client, _ := dial(t, svc)
 	ctx := metadata.AppendToOutgoingContext(context.Background(),
-		auth.HeaderUserID, uuid.NewString(), auth.HeaderRoles, "RESELLER,ADMIN", auth.HeaderRequestID, "req-42")
+		auth.HeaderUserID, uuid.NewString(), auth.HeaderRoles, "ADMIN", auth.HeaderRequestID, "req-42")
 
 	var header metadata.MD
 	resp, err := client.GetProfile(ctx, &profilesocialv1.GetProfileRequest{UserId: user.String()}, grpc.Header(&header))
@@ -225,8 +210,7 @@ func TestPrincipalAndResponseMapping(t *testing.T) {
 	}
 	p := resp.GetProfile()
 	if p.GetId() != user.String() || p.GetDisplayName() != "Nodira" || p.GetAvatar().GetMediaId() != avatar.String() ||
-		p.GetRating().GetAverage() != 4.5 || p.GetRating().GetCount() != 4 || p.GetFollowerCount() != 3 ||
-		!p.GetIsFollowedByMe() || !p.GetIsPremium() || !p.GetIsVerifiedFarmer() || p.GetVersion() != 4 ||
+		p.GetFollowerCount() != 3 || !p.GetIsFollowedByMe() || p.GetVersion() != 4 ||
 		!p.GetCreatedAt().AsTime().Equal(now) || p.GetRegion() != commonv1.Region_REGION_NAVOIY {
 		t.Fatalf("profile = %v", p)
 	}
@@ -250,12 +234,6 @@ func TestPrincipalAndResponseMapping(t *testing.T) {
 	if err != nil || svc.page.Size != 7 || svc.page.Token != "tok" || lf.GetPage().GetNextPageToken() != "next" ||
 		lf.GetPage().GetTotalSize() != 9 || len(lf.GetProfiles()) != 1 {
 		t.Fatalf("list followers = %v (page %+v), %v", lf, svc.page, err)
-	}
-	svc.ratings = domain.RatingPage{Ratings: []domain.Rating{{ID: uuid.New(), Score: 4, CreatedAt: now}}, Average: 4, Count: 1}
-	lr, err := client.ListRatings(ctx, &profilesocialv1.ListRatingsRequest{UserId: user.String()})
-	if err != nil || lr.GetSummary().GetCount() != 1 || lr.GetSummary().GetAverage() != 4 || len(lr.GetRatings()) != 1 ||
-		lr.GetPage().GetTotalSize() != 1 {
-		t.Fatalf("list ratings = %v, %v", lr, err)
 	}
 	card := &profilesocialv1.ListingCard{ListingId: uuid.NewString(), Status: domain.ListingActive}
 	svc.listings = domain.ListingPage{Listings: []*profilesocialv1.ListingCard{card}, NextPageToken: "catalog"}

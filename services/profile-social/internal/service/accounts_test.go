@@ -3,7 +3,6 @@ package service_test
 import (
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	commonv1 "github.com/tbilol/dxrl/gen/go/common/v1"
@@ -20,7 +19,7 @@ func accountUpdate(user uuid.UUID, version int64, mutate ...func(*domain.Account
 		Topic:      "agrogram.identity.account.v1",
 		OccurredAt: start,
 		UserID:     user,
-		Account:    domain.Account{Roles: []commonv1.Role{domain.RoleReseller}, Version: version},
+		Account:    domain.Account{Version: version},
 	}
 	for _, m := range mutate {
 		m(&u)
@@ -32,14 +31,8 @@ func eventType(name string) func(*domain.AccountUpdate) {
 	return func(u *domain.AccountUpdate) { u.EventType = "agrogram.events.v1." + name }
 }
 
-func farmer(u *domain.AccountUpdate) {
-	u.Account.Roles = []commonv1.Role{domain.RoleReseller, domain.RoleFarmer}
-	u.Account.IsVerifiedFarmer = true
-}
-
-func premium(until *time.Time) func(*domain.AccountUpdate) {
-	return func(u *domain.AccountUpdate) { u.Account.IsPremium, u.Account.PremiumUntil = true, until }
-}
+// admin grants ROLE_ADMIN, the only role left.
+func admin(u *domain.AccountUpdate) { u.Account.Roles = []commonv1.Role{domain.RoleAdmin} }
 
 func (h *harness) apply(u domain.AccountUpdate, want domain.ApplyOutcome) {
 	h.t.Helper()
@@ -52,7 +45,8 @@ func (h *harness) apply(u domain.AccountUpdate, want domain.ApplyOutcome) {
 	}
 }
 
-// AccountCreated creates the PENDING row; CreateProfile then keeps the badges.
+// AccountCreated creates the PENDING row; CreateProfile then keeps the
+// projection.
 func TestAccountCreatedThenCreateProfile(t *testing.T) {
 	h := newHarness(t)
 	p := user()
@@ -61,32 +55,33 @@ func TestAccountCreatedThenCreateProfile(t *testing.T) {
 	if row.Status != domain.ProfilePending || row.Account.Version != 1 || row.Version != 0 || row.DisplayName != "" {
 		t.Fatalf("pending row = %+v", row)
 	}
-	h.apply(accountUpdate(p.UserID, 2, eventType("AccountRoleChanged"), farmer), domain.Applied)
+	h.apply(accountUpdate(p.UserID, 2, eventType("AccountRoleChanged"), admin), domain.Applied)
 
 	prof := h.create(p, "Dehqon")
-	if !prof.Public() || !prof.Account.IsVerifiedFarmer || prof.Account.Version != 2 || prof.Version != 1 {
+	if !prof.Public() || !prof.HasRole(domain.RoleAdmin) || prof.Account.Version != 2 || prof.Version != 1 {
 		t.Fatalf("created = %+v", prof)
 	}
 }
 
 // CreateProfile before any account event: the row starts at account version
-// 0 and the events fill in the badges without touching the user's fields.
+// 0 and the events fill in the projection without touching the user's
+// fields.
 func TestCreateProfileBeforeAccountEvents(t *testing.T) {
 	h := newHarness(t)
 	p := user()
 	prof := h.create(p, "Early Bird")
-	if prof.Account.Version != 0 || prof.Account.IsVerifiedFarmer || prof.IsPremium {
+	if prof.Account.Version != 0 || len(prof.Account.Roles) != 0 {
 		t.Fatalf("created = %+v", prof)
 	}
 	h.apply(accountUpdate(p.UserID, 1), domain.Applied)
-	h.apply(accountUpdate(p.UserID, 2, eventType("AccountPremiumChanged"), premium(nil)), domain.Applied)
+	h.apply(accountUpdate(p.UserID, 2, eventType("AccountRoleChanged"), admin), domain.Applied)
 
 	got, err := h.svc.GetProfile(ctx, p, p.UserID.String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.DisplayName != "Early Bird" || got.District != "Asaka" || got.Version != 1 || got.Account.Version != 2 ||
-		!got.IsPremium || got.CreateRequestID != prof.CreateRequestID {
+		!got.HasRole(domain.RoleAdmin) || got.CreateRequestID != prof.CreateRequestID {
 		t.Fatalf("after events = %+v (user fields and profile version must be untouched)", got)
 	}
 }
@@ -96,12 +91,12 @@ func TestAccountEventDuplicatesAreIgnored(t *testing.T) {
 	id := uuid.New()
 	created := accountUpdate(id, 1)
 	h.apply(created, domain.Applied)
-	promoted := accountUpdate(id, 2, eventType("AccountRoleChanged"), farmer)
+	promoted := accountUpdate(id, 2, eventType("AccountRoleChanged"), admin)
 	h.apply(promoted, domain.Applied)
 
 	h.apply(created, domain.Duplicate)
 	h.apply(promoted, domain.Duplicate)
-	if row := h.row(id); row.Account.Version != 2 || !row.Account.IsVerifiedFarmer {
+	if row := h.row(id); row.Account.Version != 2 || !row.HasRole(domain.RoleAdmin) {
 		t.Fatalf("row = %+v", row)
 	}
 	if n := len(h.store.snapshot().processed); n != 2 {
@@ -113,14 +108,12 @@ func TestAccountEventDuplicatesAreIgnored(t *testing.T) {
 func TestAccountEventsOutOfOrder(t *testing.T) {
 	h := newHarness(t)
 	id := uuid.New()
-	until := start.Add(24 * time.Hour)
-	h.apply(accountUpdate(id, 3, eventType("AccountPremiumChanged"), farmer, premium(&until)), domain.Applied)
-	h.apply(accountUpdate(id, 2, eventType("AccountRoleChanged"), farmer), domain.Stale)
-	h.apply(accountUpdate(id, 1), domain.Stale) // AccountCreated last
+	h.apply(accountUpdate(id, 3, eventType("AccountRoleChanged"), admin), domain.Applied)
+	h.apply(accountUpdate(id, 2, eventType("AccountRoleChanged")), domain.Stale) // ADMIN not granted yet
+	h.apply(accountUpdate(id, 1), domain.Stale)                                  // AccountCreated last
 
 	row := h.row(id)
-	if row.Account.Version != 3 || !row.Account.IsPremium || row.Account.PremiumUntil == nil || !row.Account.IsVerifiedFarmer ||
-		len(row.Account.Roles) != 2 {
+	if row.Account.Version != 3 || !row.HasRole(domain.RoleAdmin) || len(row.Account.Roles) != 1 {
 		t.Fatalf("row = %+v, want the version 3 snapshot", row)
 	}
 	// Each event was still recorded once (so a redelivery is a duplicate).
@@ -129,26 +122,14 @@ func TestAccountEventsOutOfOrder(t *testing.T) {
 	}
 }
 
-// FarmerVerified / FarmerVerificationExpired repeat the current version: they
-// are no-ops; the badge changes with the AccountRoleChanged after them.
+// An event that repeats the current version is a no-op.
 func TestAccountEventsThatRepeatTheVersion(t *testing.T) {
 	h := newHarness(t)
-	p := user()
-	h.create(p, "Farmer To Be")
-	h.apply(accountUpdate(p.UserID, 1), domain.Applied)
-	h.apply(accountUpdate(p.UserID, 1, eventType("FarmerVerified")), domain.Stale)
-	if prof, _ := h.svc.GetProfile(ctx, p, p.UserID.String()); prof.Account.IsVerifiedFarmer {
-		t.Fatal("FarmerVerified alone must not set the badge")
-	}
-	h.apply(accountUpdate(p.UserID, 2, eventType("AccountRoleChanged"), farmer), domain.Applied)
-	if prof, _ := h.svc.GetProfile(ctx, p, p.UserID.String()); !prof.Account.IsVerifiedFarmer {
-		t.Fatal("AccountRoleChanged must set the badge")
-	}
-	h.apply(accountUpdate(p.UserID, 2, eventType("FarmerVerificationExpired"), farmer), domain.Stale)
-	h.apply(accountUpdate(p.UserID, 3, eventType("AccountRoleChanged")), domain.Applied) // FARMER revoked
-	prof, _ := h.svc.GetProfile(ctx, p, p.UserID.String())
-	if prof.Account.IsVerifiedFarmer || prof.Account.Version != 3 || len(prof.Account.Roles) != 1 {
-		t.Fatalf("after expiry = %+v", prof.Account)
+	id := uuid.New()
+	h.apply(accountUpdate(id, 1), domain.Applied)
+	h.apply(accountUpdate(id, 1, eventType("AccountRoleChanged"), admin), domain.Stale)
+	if row := h.row(id); row.HasRole(domain.RoleAdmin) {
+		t.Fatalf("row = %+v, want version 1 unchanged", row)
 	}
 }
 
@@ -157,24 +138,9 @@ func TestUnknownAccountEventTypeAppliesSnapshot(t *testing.T) {
 	h := newHarness(t)
 	id := uuid.New()
 	h.apply(accountUpdate(id, 1), domain.Applied)
-	h.apply(accountUpdate(id, 2, eventType("AccountFrozen"), premium(nil)), domain.Applied)
-	if row := h.row(id); row.Account.Version != 2 || !row.Account.IsPremium {
+	h.apply(accountUpdate(id, 2, eventType("AccountFrozen"), admin), domain.Applied)
+	if row := h.row(id); row.Account.Version != 2 || !row.HasRole(domain.RoleAdmin) {
 		t.Fatalf("row = %+v", row)
-	}
-}
-
-func TestPremiumBadgeEndsWithPremiumUntil(t *testing.T) {
-	h := newHarness(t)
-	p := user()
-	h.create(p, "Premium")
-	until := start.Add(time.Hour)
-	h.apply(accountUpdate(p.UserID, 2, eventType("AccountPremiumChanged"), premium(&until)), domain.Applied)
-	if prof, _ := h.svc.GetProfile(ctx, p, p.UserID.String()); !prof.IsPremium {
-		t.Fatal("premium badge must show before premium_until")
-	}
-	h.clock.Advance(2 * time.Hour)
-	if prof, _ := h.svc.GetProfile(ctx, p, p.UserID.String()); prof.IsPremium {
-		t.Fatal("premium badge must disappear after premium_until (identity publishes no event then)")
 	}
 }
 

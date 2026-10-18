@@ -59,7 +59,7 @@ func (s *Service) FollowUser(ctx context.Context, p auth.Principal, userID strin
 	if added {
 		s.log.DebugContext(ctx, "followed", "follower_id", follower, "followee_id", target)
 	}
-	return s.present(prof), nil
+	return prof, nil
 }
 
 // UnfollowUser removes the caller's follow of userID and returns that
@@ -88,7 +88,7 @@ func (s *Service) UnfollowUser(ctx context.Context, p auth.Principal, userID str
 	if err != nil {
 		return domain.Profile{}, fmt.Errorf("unfollow user: %w", err)
 	}
-	return s.present(prof), nil
+	return prof, nil
 }
 
 // followArgs checks the caller, the target and the rate limit.
@@ -167,7 +167,7 @@ func (s *Service) listFollows(ctx context.Context, p auth.Principal, userID stri
 	}
 	out.Profiles = make([]domain.Profile, len(entries))
 	for i, e := range entries {
-		out.Profiles[i] = s.present(e.Profile)
+		out.Profiles[i] = e.Profile
 	}
 	return out, nil
 }

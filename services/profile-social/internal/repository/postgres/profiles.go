@@ -17,8 +17,7 @@ import (
 // profileCols are the columns scanProfile reads, in order, from `profiles p`.
 const profileCols = `p.id, p.status, p.display_name, p.avatar_media_id, p.bio, p.region, p.district,
        p.create_request_id, p.version, p.created_at, p.updated_at, p.deleted_at,
-       p.follower_count, p.following_count, p.rating_count, p.rating_sum, p.deals_count,
-       p.roles, p.is_verified_farmer, p.is_premium, p.premium_until, p.account_version`
+       p.follower_count, p.following_count, p.roles, p.account_version`
 
 // followedByViewer is the is_followed_by_me column for the viewer in $2.
 const followedByViewer = `EXISTS (SELECT 1 FROM follows m WHERE m.follower_id = $2 AND m.followee_id = p.id)`
@@ -26,20 +25,19 @@ const followedByViewer = `EXISTS (SELECT 1 FROM follows m WHERE m.follower_id = 
 // scanProfile reads profileCols plus is_followed_by_me, then extra columns.
 func scanProfile(row pgx.Row, extra ...any) (domain.Profile, error) {
 	var (
-		p                    domain.Profile
-		status, bio          string
-		displayName, region  *string
-		avatar, createReq    *uuid.UUID
-		createdAt            *time.Time
-		updatedAt            time.Time
-		deletedAt, premUntil *time.Time
-		roleNames            []string
+		p                   domain.Profile
+		status, bio         string
+		displayName, region *string
+		avatar, createReq   *uuid.UUID
+		createdAt           *time.Time
+		updatedAt           time.Time
+		deletedAt           *time.Time
+		roleNames           []string
 	)
 	dest := append([]any{
 		&p.ID, &status, &displayName, &avatar, &bio, &region, &p.District,
 		&createReq, &p.Version, &createdAt, &updatedAt, &deletedAt,
-		&p.FollowerCount, &p.FollowingCount, &p.RatingCount, &p.RatingSum, &p.DealsCount,
-		&roleNames, &p.Account.IsVerifiedFarmer, &p.Account.IsPremium, &premUntil, &p.Account.Version,
+		&p.FollowerCount, &p.FollowingCount, &roleNames, &p.Account.Version,
 		&p.IsFollowedByMe,
 	}, extra...)
 	err := row.Scan(dest...)
@@ -78,7 +76,7 @@ func scanProfile(row pgx.Row, extra ...any) (domain.Profile, error) {
 	if createdAt != nil {
 		p.CreatedAt = utc(*createdAt)
 	}
-	p.UpdatedAt, p.DeletedAt, p.Account.PremiumUntil = utc(updatedAt), utcPtr(deletedAt), utcPtr(premUntil)
+	p.UpdatedAt, p.DeletedAt = utc(updatedAt), utcPtr(deletedAt)
 	return p, nil
 }
 
@@ -192,15 +190,13 @@ func (q *queries) ApplyAccount(ctx context.Context, userID uuid.UUID, a domain.A
 		roleNames = append(roleNames, name)
 	}
 	tag, err := q.db.Exec(ctx, `
-INSERT INTO profiles (id, status, updated_at, roles, is_verified_farmer, is_premium, premium_until,
-                      account_version, account_synced_at)
-VALUES ($1, 'PENDING', $7, $2, $3, $4, $5, $6, $7)
+INSERT INTO profiles (id, status, updated_at, roles, account_version, account_synced_at)
+VALUES ($1, 'PENDING', $4, $2, $3, $4)
 ON CONFLICT (id) DO UPDATE
-SET roles = EXCLUDED.roles, is_verified_farmer = EXCLUDED.is_verified_farmer, is_premium = EXCLUDED.is_premium,
-    premium_until = EXCLUDED.premium_until, account_version = EXCLUDED.account_version,
+SET roles = EXCLUDED.roles, account_version = EXCLUDED.account_version,
     account_synced_at = EXCLUDED.account_synced_at
 WHERE profiles.account_version < EXCLUDED.account_version`,
-		userID, roleNames, a.IsVerifiedFarmer, a.IsPremium, a.PremiumUntil, a.Version, now)
+		userID, roleNames, a.Version, now)
 	if err != nil {
 		return false, fmt.Errorf("apply account snapshot: %w", err)
 	}

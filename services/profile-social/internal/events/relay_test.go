@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	commonv1 "github.com/tbilol/dxrl/gen/go/common/v1"
-	eventsv1 "github.com/tbilol/dxrl/gen/go/events/v1"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -64,23 +62,23 @@ func (failingProducer) ProduceSync(_ context.Context, rs ...*kgo.Record) kgo.Pro
 	return res
 }
 
+// testEventType is the event type of the synthetic outbox rows: the relay
+// publishes rows as they are and never decodes them.
+const testEventType = "agrogram.events.v1.ProfileUpdated"
+
 func messages(t *testing.T, n int) []Message {
 	t.Helper()
 	out := make([]Message, n)
 	for i := range out {
-		p := sampleProfile()
-		m, err := NewProfileEvent(ProfileChange{
-			Profile: p,
-			Event: &eventsv1.RatingUpdated{RatingId: uuid.NewString(), RaterId: uuid.NewString(),
-				TransactionId: uuid.NewString(), Score: 4},
-			OccurredAt:    testNow,
-			CorrelationID: "req-1",
-			Actor:         &commonv1.Actor{Kind: &commonv1.Actor_Service{Service: ProducerName}},
-		})
-		if err != nil {
-			t.Fatal(err)
+		id, user := uuid.Must(uuid.NewV7()), uuid.NewString()
+		out[i] = Message{
+			ID: id, Topic: TopicProfile, Key: user, Value: []byte{0x0a, 0x00}, EventType: testEventType,
+			Headers: map[string]string{
+				HeaderContentType: ContentType, HeaderEventType: testEventType, HeaderEventID: id.String(),
+				HeaderRequestID: "req-1",
+			},
+			CreatedAt: testNow,
 		}
-		out[i] = m
 	}
 	return out
 }
@@ -167,7 +165,7 @@ func TestRelayPublishesOutboxToKafka(t *testing.T) {
 				t.Fatalf("record header %s = %q, want %q", k, headers[k], v)
 			}
 		}
-		if headers[HeaderContentType] != ContentType || headers[HeaderEventType] != RatingUpdatedType {
+		if headers[HeaderContentType] != ContentType || headers[HeaderEventType] != testEventType {
 			t.Fatalf("headers = %v", headers)
 		}
 	}

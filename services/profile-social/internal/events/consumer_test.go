@@ -55,49 +55,6 @@ func (f *fakeApplier) snapshot() (applied []domain.AccountUpdate, attempts map[u
 	return append([]domain.AccountUpdate(nil), f.applied...), attempts
 }
 
-// fakeRecorder mimics the service's idempotency: an inbox of event ids and
-// the transactions recorded by id. While err is set, every call fails.
-type fakeRecorder struct {
-	mu       sync.Mutex
-	calls    []domain.TransactionUpdate
-	outcomes []domain.ApplyOutcome
-	inbox    map[uuid.UUID]bool
-	recorded map[uuid.UUID]domain.CompletedTransaction
-	err      error
-}
-
-func (f *fakeRecorder) RecordCompletedTransaction(_ context.Context, u domain.TransactionUpdate) (domain.ApplyOutcome, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.err != nil {
-		return 0, f.err
-	}
-	if f.inbox == nil {
-		f.inbox, f.recorded = map[uuid.UUID]bool{}, map[uuid.UUID]domain.CompletedTransaction{}
-	}
-	_, known := f.recorded[u.Transaction.ID]
-	outcome := domain.Applied
-	switch {
-	case f.inbox[u.EventID]:
-		outcome = domain.Duplicate
-	case known:
-		outcome = domain.Stale
-	default:
-		f.recorded[u.Transaction.ID] = u.Transaction
-	}
-	f.inbox[u.EventID] = true
-	f.calls = append(f.calls, u)
-	f.outcomes = append(f.outcomes, outcome)
-	return outcome, nil
-}
-
-func (f *fakeRecorder) snapshot() (calls []domain.TransactionUpdate, outcomes []domain.ApplyOutcome, recorded int) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	calls = append([]domain.TransactionUpdate(nil), f.calls...)
-	return calls, append([]domain.ApplyOutcome(nil), f.outcomes...), len(f.recorded)
-}
-
 // fakeDLQ records dead letters; while failing is set, every publish fails.
 type fakeDLQ struct {
 	mu      sync.Mutex
@@ -129,14 +86,12 @@ func (d *fakeDLQ) snapshot() (records []*kgo.Record, calls int) {
 }
 
 // consumerHarness runs a Consumer on a kfake cluster with one partition per
-// topic. Like serve.go it subscribes both consumed streams in one group: the
-// account stream (applier) and the transaction stream (recorder).
+// topic. Like serve.go it subscribes identity's account stream (applier).
 type consumerHarness struct {
 	t        *testing.T
 	producer *kgo.Client
 	client   *kgo.Client
 	applier  *fakeApplier
-	recorder *fakeRecorder
 	dlq      *fakeDLQ
 	consumer *Consumer
 	cancel   context.CancelFunc
@@ -145,7 +100,7 @@ type consumerHarness struct {
 
 func newConsumerHarness(t *testing.T, cfg ConsumerConfig) *consumerHarness {
 	t.Helper()
-	cluster, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.SeedTopics(1, TopicAccount, TopicTransaction, TopicDeadLetter))
+	cluster, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.SeedTopics(1, TopicAccount, TopicDeadLetter))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +113,7 @@ func newConsumerHarness(t *testing.T, cfg ConsumerConfig) *consumerHarness {
 	client, err := kgo.NewClient(
 		kgo.SeedBrokers(cluster.ListenAddrs()...),
 		kgo.ConsumerGroup("profilesocial"),
-		kgo.ConsumeTopics(TopicAccount, TopicTransaction),
+		kgo.ConsumeTopics(TopicAccount),
 		kgo.DisableAutoCommit(),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 		kgo.FetchMaxWait(100*time.Millisecond),
@@ -167,8 +122,7 @@ func newConsumerHarness(t *testing.T, cfg ConsumerConfig) *consumerHarness {
 		t.Fatal(err)
 	}
 	t.Cleanup(client.Close)
-	h := &consumerHarness{t: t, producer: producer, client: client, applier: &fakeApplier{}, recorder: &fakeRecorder{},
-		dlq: &fakeDLQ{}}
+	h := &consumerHarness{t: t, producer: producer, client: client, applier: &fakeApplier{}, dlq: &fakeDLQ{}}
 	cfg.Group = "profilesocial"
 	cfg.RetryBackoff, cfg.MaxBackoff = time.Millisecond, 5*time.Millisecond
 	if cfg.Transient == nil {
@@ -176,8 +130,7 @@ func newConsumerHarness(t *testing.T, cfg ConsumerConfig) *consumerHarness {
 	}
 	log, v := slog.New(slog.DiscardHandler), newValidator(t)
 	h.consumer = NewConsumer(client, h.dlq, map[string]RecordHandler{
-		TopicAccount:     NewAccountHandler(h.applier, v, log),
-		TopicTransaction: NewTransactionHandler(h.recorder, v, log),
+		TopicAccount: NewAccountHandler(h.applier, v, log),
 	}, nil, cfg, log)
 	return h
 }
@@ -234,18 +187,24 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// adminGranted is an AccountRoleChanged that grants ADMIN; invalidRoleChange
+// fails protovalidate (an UNSPECIFIED role).
+var (
+	adminGranted = &eventsv1.AccountRoleChanged{
+		Roles: []commonv1.Role{commonv1.Role_ROLE_ADMIN}, GrantedRoles: []commonv1.Role{commonv1.Role_ROLE_ADMIN},
+	}
+	invalidRoleChange = &eventsv1.AccountRoleChanged{Roles: []commonv1.Role{commonv1.Role_ROLE_UNSPECIFIED}}
+)
+
 func accountRecord(t *testing.T, user uuid.UUID, version int64, event proto.Message) *kgo.Record {
 	t.Helper()
-	r := record(t, TopicAccount, accountEvent(user, version, event), user.String())
+	var roles []commonv1.Role
+	if rc, ok := event.(*eventsv1.AccountRoleChanged); ok {
+		roles = rc.GetRoles()
+	}
+	r := record(t, TopicAccount, accountEvent(user, version, event, roles...), user.String())
 	r.Topic = TopicAccount
 	return r
-}
-
-// transactionRecord is env as order-escrow publishes it, keyed by the
-// transaction id.
-func transactionRecord(t *testing.T, env *eventsv1.TransactionEvent) *kgo.Record {
-	t.Helper()
-	return record(t, TopicTransaction, env, env.GetTransaction().GetId())
 }
 
 func TestConsumerAppliesInOrderAndCommits(t *testing.T) {
@@ -253,8 +212,8 @@ func TestConsumerAppliesInOrderAndCommits(t *testing.T) {
 	user := uuid.New()
 	h.produce(
 		accountRecord(t, user, 1, &eventsv1.AccountCreated{}),
-		accountRecord(t, user, 1, &eventsv1.FarmerVerified{}), // invalid: no verification id -> poison
-		accountRecord(t, user, 2, &eventsv1.AccountPremiumChanged{IsPremium: true}),
+		accountRecord(t, user, 1, invalidRoleChange), // invalid: an UNSPECIFIED role -> poison
+		accountRecord(t, user, 2, adminGranted),
 	)
 	h.start()
 	waitFor(t, "two applied events", func() bool { applied, _ := h.applier.snapshot(); return len(applied) == 2 })
@@ -262,12 +221,12 @@ func TestConsumerAppliesInOrderAndCommits(t *testing.T) {
 	h.stop()
 
 	applied, _ := h.applier.snapshot()
-	if applied[0].Account.Version != 1 || applied[1].Account.Version != 2 || !applied[1].Account.IsPremium {
+	if applied[0].Account.Version != 1 || applied[1].Account.Version != 2 || len(applied[1].Account.Roles) != 1 {
 		t.Fatalf("applied = %+v, want versions 1 then 2", applied)
 	}
 	dead, _ := h.dlq.snapshot()
 	if len(dead) != 1 {
-		t.Fatalf("dead letters = %d, want 1 (the invalid FarmerVerified)", len(dead))
+		t.Fatalf("dead letters = %d, want 1 (the invalid AccountRoleChanged)", len(dead))
 	}
 	var dl eventsv1.DeadLetter
 	if err := proto.Unmarshal(dead[0].Value, &dl); err != nil {
@@ -338,7 +297,7 @@ func TestConsumerDeadLettersWhenRetryBudgetIsSpent(t *testing.T) {
 		}
 		return nil
 	}
-	h.produce(bad, accountRecord(t, user, 2, &eventsv1.AccountPremiumChanged{IsPremium: true}))
+	h.produce(bad, accountRecord(t, user, 2, adminGranted))
 	h.start()
 	waitFor(t, "the commit past both records", func() bool { return h.committed(TopicAccount) == 2 })
 	h.stop()
@@ -366,7 +325,7 @@ func TestConsumerDeadLettersWhenRetryBudgetIsSpent(t *testing.T) {
 func TestConsumerStopsWithoutCommittingTheRecordInProgress(t *testing.T) {
 	h := newConsumerHarness(t, ConsumerConfig{})
 	user := uuid.New()
-	second := accountRecord(t, user, 2, &eventsv1.AccountPremiumChanged{IsPremium: true})
+	second := accountRecord(t, user, 2, adminGranted)
 	h.applier.fail = func(u domain.AccountUpdate, _ int) error {
 		if u.Account.Version == 2 {
 			return errDBDown
@@ -407,89 +366,6 @@ func TestConsumerRetriesDeadLetterPublish(t *testing.T) {
 }
 
 // Both streams in one group, as serve.go wires them: account records are
-// applied, a transaction record before COMPLETED never reaches the recorder,
-// PayoutReleased records the transaction, and neither its redelivery nor the
-// BonusAwarded after it records it again.
-func TestConsumerRecordsCompletedTransactions(t *testing.T) {
-	h := newConsumerHarness(t, ConsumerConfig{})
-	user, id, farmer, reseller := uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	held := transactionEvent(id, farmer, reseller, eventsv1.TransactionState_TRANSACTION_STATE_PAYMENT_HELD)
-	done := transactionEvent(id, farmer, reseller, eventsv1.TransactionState_TRANSACTION_STATE_COMPLETED)
-	bonus := bonusAwarded(done)
-	h.produce(
-		accountRecord(t, user, 1, &eventsv1.AccountCreated{}),
-		transactionRecord(t, held),
-		transactionRecord(t, done),
-		accountRecord(t, user, 2, &eventsv1.AccountPremiumChanged{IsPremium: true}),
-		transactionRecord(t, done), // the same PayoutReleased again (at-least-once)
-		transactionRecord(t, bonus),
-	)
-	h.start()
-	waitFor(t, "the commits on both topics", func() bool {
-		return h.committed(TopicAccount) == 2 && h.committed(TopicTransaction) == 4
-	})
-	h.stop()
-
-	if applied, _ := h.applier.snapshot(); len(applied) != 2 || applied[0].Account.Version != 1 || applied[1].Account.Version != 2 {
-		t.Fatalf("applied = %+v, want account versions 1 then 2", applied)
-	}
-	calls, outcomes, recorded := h.recorder.snapshot()
-	want := []struct {
-		eventID string
-		outcome domain.ApplyOutcome
-	}{
-		{done.GetMetadata().GetEventId(), domain.Applied},
-		{done.GetMetadata().GetEventId(), domain.Duplicate},
-		{bonus.GetMetadata().GetEventId(), domain.Stale},
-	}
-	if len(calls) != len(want) || recorded != 1 {
-		t.Fatalf("recorder calls = %d (want %d: PaymentHeld is skipped), transactions recorded = %d (want 1)",
-			len(calls), len(want), recorded)
-	}
-	for i, w := range want {
-		if c := calls[i]; c.EventID.String() != w.eventID || outcomes[i] != w.outcome || c.Transaction.ID != id ||
-			c.Transaction.FarmerID != farmer || c.Transaction.ResellerID != reseller || c.Topic != TopicTransaction {
-			t.Fatalf("call %d = %+v, %s; want event %s, %s", i+1, c, outcomes[i], w.eventID, w.outcome)
-		}
-	}
-	if dead, _ := h.dlq.snapshot(); len(dead) != 0 {
-		t.Fatalf("dead letters = %d, want none", len(dead))
-	}
-}
-
-// A poison transaction record is dead-lettered at once, never reaches the
-// recorder, and the consumer moves on to the next record.
-func TestConsumerDeadLettersPoisonTransactionRecords(t *testing.T) {
-	h := newConsumerHarness(t, ConsumerConfig{})
-	id, farmer, reseller := uuid.New(), uuid.New(), uuid.New()
-	poison := transactionEvent(id, farmer, reseller, eventsv1.TransactionState_TRANSACTION_STATE_COMPLETED)
-	poison.Metadata.AggregateVersion = 5 // contradicts the snapshot (version 6)
-	done := transactionEvent(id, farmer, reseller, eventsv1.TransactionState_TRANSACTION_STATE_COMPLETED)
-	h.produce(transactionRecord(t, poison), transactionRecord(t, done))
-	h.start()
-	waitFor(t, "the commit past both records", func() bool { return h.committed(TopicTransaction) == 2 })
-	h.stop()
-
-	calls, outcomes, recorded := h.recorder.snapshot()
-	if len(calls) != 1 || calls[0].EventID.String() != done.GetMetadata().GetEventId() || outcomes[0] != domain.Applied ||
-		recorded != 1 {
-		t.Fatalf("calls = %+v, outcomes = %v; want only the valid record, applied", calls, outcomes)
-	}
-	dead, _ := h.dlq.snapshot()
-	if len(dead) != 1 || dead[0].Topic != TopicDeadLetter || string(dead[0].Key) != id.String() {
-		t.Fatalf("dead letters = %v, want one keyed by the transaction id", dead)
-	}
-	var dl eventsv1.DeadLetter
-	if err := proto.Unmarshal(dead[0].Value, &dl); err != nil {
-		t.Fatal(err)
-	}
-	if dl.GetSourceTopic() != TopicTransaction || dl.GetSourceOffset() != 0 || dl.GetConsumerGroup() != "profilesocial" ||
-		dl.GetAttempts() != 1 || dl.GetError().GetReason() != commonv1.ErrorReason_ERROR_REASON_VALIDATION_FAILED ||
-		dl.GetError().GetMetadata()["failure"] != "poison" {
-		t.Fatalf("dead letter = %v", &dl)
-	}
-}
-
 func TestPermanent(t *testing.T) {
 	base := errors.New("bad")
 	if Permanent(nil) != nil || !IsPermanent(Permanent(base)) || IsPermanent(base) || !errors.Is(Permanent(base), base) {

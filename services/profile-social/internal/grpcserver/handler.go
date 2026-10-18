@@ -24,8 +24,6 @@ type Service interface {
 	UnfollowUser(ctx context.Context, p auth.Principal, userID string) (domain.Profile, error)
 	ListFollowers(ctx context.Context, p auth.Principal, userID string, page domain.PageRequest) (domain.ProfilePage, error)
 	ListFollowing(ctx context.Context, p auth.Principal, userID string, page domain.PageRequest) (domain.ProfilePage, error)
-	RateUser(ctx context.Context, p auth.Principal, requestID, transactionID string, score int32, comment string) (domain.Rating, error)
-	ListRatings(ctx context.Context, p auth.Principal, userID string, page domain.PageRequest) (domain.RatingPage, error)
 	ListUserListings(ctx context.Context, p auth.Principal, userID string, kind commonv1.ListingKind,
 		statuses []eventsv1.ListingStatus, page domain.PageRequest) (domain.ListingPage, error)
 }
@@ -115,30 +113,6 @@ func (h *handler) ListFollowing(ctx context.Context, req *profilesocialv1.ListFo
 	return &profilesocialv1.ListFollowingResponse{Profiles: profilesProto(page.Profiles), Page: pageResponse(page)}, nil
 }
 
-func (h *handler) RateUser(ctx context.Context, req *profilesocialv1.RateUserRequest) (*profilesocialv1.RateUserResponse, error) {
-	r, err := h.svc.RateUser(ctx, principal(ctx), req.GetRequestId(), req.GetTransactionId(), req.GetScore(), req.GetComment())
-	if err != nil {
-		return nil, err
-	}
-	return &profilesocialv1.RateUserResponse{Rating: ratingProto(r)}, nil
-}
-
-func (h *handler) ListRatings(ctx context.Context, req *profilesocialv1.ListRatingsRequest) (*profilesocialv1.ListRatingsResponse, error) {
-	page, err := h.svc.ListRatings(ctx, principal(ctx), req.GetUserId(), pageRequest(req.GetPage()))
-	if err != nil {
-		return nil, err
-	}
-	resp := &profilesocialv1.ListRatingsResponse{
-		Ratings: make([]*profilesocialv1.Rating, len(page.Ratings)),
-		Summary: &eventsv1.RatingSummary{Average: page.Average, Count: page.Count},
-		Page:    &commonv1.PageResponse{NextPageToken: page.NextPageToken, TotalSize: &page.Count},
-	}
-	for i, r := range page.Ratings {
-		resp.Ratings[i] = ratingProto(r)
-	}
-	return resp, nil
-}
-
 func (h *handler) ListUserListings(ctx context.Context, req *profilesocialv1.ListUserListingsRequest) (*profilesocialv1.ListUserListingsResponse, error) {
 	page, err := h.svc.ListUserListings(ctx, principal(ctx), req.GetUserId(), req.GetKind(), req.GetStatuses(),
 		pageRequest(req.GetPage()))
@@ -191,20 +165,16 @@ func profilesProto(ps []domain.Profile) []*profilesocialv1.Profile {
 
 func profileProto(p domain.Profile) *profilesocialv1.Profile {
 	pb := &profilesocialv1.Profile{
-		Id:               p.ID.String(),
-		DisplayName:      p.DisplayName,
-		Bio:              p.Bio,
-		Region:           p.Region,
-		District:         p.District,
-		Rating:           &eventsv1.RatingSummary{Average: p.RatingAverage(), Count: p.RatingCount},
-		DealsCount:       p.DealsCount,
-		FollowerCount:    p.FollowerCount,
-		FollowingCount:   p.FollowingCount,
-		IsVerifiedFarmer: p.Account.IsVerifiedFarmer,
-		IsPremium:        p.IsPremium,
-		IsFollowedByMe:   p.IsFollowedByMe,
-		Version:          p.Version,
-		UpdatedAt:        timestamppb.New(p.UpdatedAt),
+		Id:             p.ID.String(),
+		DisplayName:    p.DisplayName,
+		Bio:            p.Bio,
+		Region:         p.Region,
+		District:       p.District,
+		FollowerCount:  p.FollowerCount,
+		FollowingCount: p.FollowingCount,
+		IsFollowedByMe: p.IsFollowedByMe,
+		Version:        p.Version,
+		UpdatedAt:      timestamppb.New(p.UpdatedAt),
 	}
 	if !p.CreatedAt.IsZero() {
 		pb.CreatedAt = timestamppb.New(p.CreatedAt)
@@ -215,16 +185,4 @@ func profileProto(p domain.Profile) *profilesocialv1.Profile {
 		pb.Avatar = &commonv1.MediaRef{MediaId: p.AvatarMediaID.String()}
 	}
 	return pb
-}
-
-func ratingProto(r domain.Rating) *profilesocialv1.Rating {
-	return &profilesocialv1.Rating{
-		Id:            r.ID.String(),
-		TransactionId: r.TransactionID.String(),
-		RaterId:       r.RaterID.String(),
-		RatedUserId:   r.RatedUserID.String(),
-		Score:         r.Score,
-		Comment:       r.Comment,
-		CreatedAt:     timestamppb.New(r.CreatedAt),
-	}
 }

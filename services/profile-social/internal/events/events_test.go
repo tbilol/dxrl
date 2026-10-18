@@ -1,9 +1,6 @@
 package events
 
 import (
-	"context"
-	"errors"
-	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -16,8 +13,6 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
-
-	"github.com/tbilol/dxrl/services/profile-social/internal/domain"
 )
 
 func newValidator(t *testing.T) protovalidate.Validator {
@@ -29,106 +24,23 @@ func newValidator(t *testing.T) protovalidate.Validator {
 	return v
 }
 
-func sampleProfile() domain.Profile {
-	until := testNow.Add(-time.Minute) // Premium ended before the event
-	return domain.Profile{
-		ID:     uuid.New(),
-		Status: domain.ProfileActive,
-		ProfileFields: domain.ProfileFields{
-			DisplayName: "Alisher Dehqon", AvatarMediaID: uuid.New(), Region: commonv1.Region_REGION_SAMARQAND, District: "Urgut",
-		},
-		Version: 3, CreatedAt: testNow.Add(-24 * time.Hour), UpdatedAt: testNow,
-		FollowerCount: 7, FollowingCount: 2, RatingCount: 2, RatingSum: 9,
-		Account: domain.Account{Roles: []commonv1.Role{domain.RoleReseller, domain.RoleFarmer}, IsVerifiedFarmer: true,
-			IsPremium: true, PremiumUntil: &until, Version: 4},
-	}
-}
-
-func TestNewProfileEvent(t *testing.T) {
-	p := sampleProfile()
-	rater, tx, rating := uuid.New(), uuid.New(), uuid.New()
-	m, err := NewProfileEvent(ProfileChange{
-		Profile:       p,
-		Event:         &eventsv1.RatingUpdated{RatingId: rating.String(), RaterId: rater.String(), TransactionId: tx.String(), Score: 5},
-		OccurredAt:    testNow,
-		CorrelationID: "req-7",
-		Traceparent:   testTraceparent,
-		Actor:         &commonv1.Actor{Kind: &commonv1.Actor_UserId{UserId: rater.String()}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if RatingUpdatedType != "agrogram.events.v1.RatingUpdated" {
-		t.Fatalf("event type = %q", RatingUpdatedType)
-	}
-	if m.Topic != TopicProfile || m.Key != p.ID.String() || m.EventType != RatingUpdatedType || m.ID.Version() != 7 ||
-		!m.CreatedAt.Equal(testNow) {
-		t.Fatalf("message = %+v", m)
-	}
-	for k, v := range map[string]string{
-		HeaderContentType: ContentType, HeaderEventType: RatingUpdatedType, HeaderEventID: m.ID.String(),
-		HeaderRequestID: "req-7", HeaderTraceparent: testTraceparent,
-	} {
-		if m.Headers[k] != v {
-			t.Fatalf("header %s = %q, want %q", k, m.Headers[k], v)
-		}
-	}
-	var env eventsv1.ProfileEvent
-	if err := proto.Unmarshal(m.Value, &env); err != nil {
-		t.Fatal(err)
-	}
-	md, s := env.GetMetadata(), env.GetProfile()
-	if md.GetEventId() != m.ID.String() || md.GetProducer() != ProducerName || md.GetAggregateId() != p.ID.String() ||
-		md.GetAggregateVersion() != 3 || md.GetAggregateType() != commonv1.ResourceType_RESOURCE_TYPE_USER ||
-		md.GetActor().GetUserId() != rater.String() {
-		t.Fatalf("metadata = %v", md)
-	}
-	if s.GetDisplayName() != "Alisher Dehqon" || s.GetVersion() != 3 || s.GetRating().GetCount() != 2 ||
-		s.GetRating().GetAverage() != 4.5 || s.GetFollowerCount() != 7 || !s.GetIsVerifiedFarmer() ||
-		s.GetIsPremium() || s.GetAvatar().GetMediaId() != p.AvatarMediaID.String() || s.GetRegion() != commonv1.Region_REGION_SAMARQAND {
-		t.Fatalf("snapshot = %v (Premium must be evaluated at occurred_at)", s)
-	}
-	if e := env.GetRatingUpdated(); e.GetRatingId() != rating.String() || e.GetScore() != 5 || e.GetTransactionId() != tx.String() {
-		t.Fatalf("event = %v", e)
-	}
-}
-
-func TestNewProfileEventRejectsInvalid(t *testing.T) {
-	pending := sampleProfile()
-	pending.DisplayName = "" // a PENDING profile: the snapshot requires a display name
-	ev := &eventsv1.RatingUpdated{RatingId: uuid.NewString(), RaterId: uuid.NewString(), TransactionId: uuid.NewString(), Score: 4}
-	actor := &commonv1.Actor{Kind: &commonv1.Actor_Service{Service: ProducerName}}
-	if _, err := NewProfileEvent(ProfileChange{Profile: pending, Event: ev, OccurredAt: testNow, CorrelationID: "r", Actor: actor}); err == nil {
-		t.Fatal("want an error for a profile without a display name")
-	}
-	if _, err := NewProfileEvent(ProfileChange{Profile: sampleProfile(), OccurredAt: testNow, CorrelationID: "r", Actor: actor}); err == nil {
-		t.Fatal("want an error without an event")
-	}
-	if _, err := NewProfileEvent(ProfileChange{Profile: sampleProfile(), Event: &eventsv1.AccountCreated{},
-		OccurredAt: testNow, CorrelationID: "r", Actor: actor}); err == nil {
-		t.Fatal("want an error for a message that is not a ProfileEvent case")
-	}
-}
-
 func TestDecodeAccountRecord(t *testing.T) {
 	v := newValidator(t)
 	user := uuid.New()
-	until := testNow.Add(30 * 24 * time.Hour)
-	env := accountEvent(user, 3, &eventsv1.AccountPremiumChanged{IsPremium: true},
-		commonv1.Role_ROLE_FARMER, commonv1.Role_ROLE_RESELLER)
-	env.Account.PremiumUntil = timestampOf(until)
+	env := accountEvent(user, 3, &eventsv1.AccountRoleChanged{
+		Roles: []commonv1.Role{commonv1.Role_ROLE_ADMIN}, GrantedRoles: []commonv1.Role{commonv1.Role_ROLE_ADMIN},
+	}, commonv1.Role_ROLE_ADMIN)
 	u, err := DecodeAccountRecord(record(t, TopicAccount, env, user.String()), v)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if u.UserID != user || u.EventID.String() != env.GetMetadata().GetEventId() || u.Topic != TopicAccount ||
-		u.EventType != "agrogram.events.v1.AccountPremiumChanged" || !u.OccurredAt.Equal(testNow) ||
-		u.Account.Version != 3 || !u.Account.IsPremium || !u.Account.IsVerifiedFarmer ||
-		u.Account.PremiumUntil == nil || !u.Account.PremiumUntil.Equal(until) {
+		u.EventType != "agrogram.events.v1.AccountRoleChanged" || !u.OccurredAt.Equal(testNow) ||
+		u.Account.Version != 3 {
 		t.Fatalf("update = %+v", u)
 	}
-	if len(u.Account.Roles) != 2 || u.Account.Roles[0] != commonv1.Role_ROLE_RESELLER || u.Account.Roles[1] != commonv1.Role_ROLE_FARMER {
-		t.Fatalf("roles = %v, want sorted", u.Account.Roles)
+	if len(u.Account.Roles) != 1 || u.Account.Roles[0] != commonv1.Role_ROLE_ADMIN {
+		t.Fatalf("roles = %v, want [ADMIN]", u.Account.Roles)
 	}
 }
 
@@ -233,127 +145,6 @@ func TestNewDeadLetter(t *testing.T) {
 			len(e.GetMessage()) > maxDeadLetterMessage || !utf8.ValidString(e.GetMessage()) {
 			t.Fatalf("%s: error = %v", tc.name, e)
 		}
-	}
-}
-
-func TestDecodeTransactionRecord(t *testing.T) {
-	v := newValidator(t)
-	id, farmer, reseller := uuid.New(), uuid.New(), uuid.New()
-
-	done := transactionEvent(id, farmer, reseller, eventsv1.TransactionState_TRANSACTION_STATE_COMPLETED)
-	u, completed, err := DecodeTransactionRecord(record(t, TopicTransaction, done, id.String()), v)
-	if err != nil || !completed {
-		t.Fatalf("completed = %v, err = %v", completed, err)
-	}
-	if u.EventID.String() != done.GetMetadata().GetEventId() || u.EventType != "agrogram.events.v1.PayoutReleased" ||
-		u.Topic != TopicTransaction || !u.OccurredAt.Equal(testNow) || u.Version != 6 {
-		t.Fatalf("update = %+v", u)
-	}
-	if tx := u.Transaction; tx.ID != id || tx.FarmerID != farmer || tx.ResellerID != reseller || !tx.CompletedAt.Equal(testNow) {
-		t.Fatalf("transaction = %+v", tx)
-	}
-
-	// BonusAwarded repeats COMPLETED at the next version, with its own event id.
-	bonus := bonusAwarded(done)
-	u, completed, err = DecodeTransactionRecord(record(t, TopicTransaction, bonus, id.String()), v)
-	if err != nil || !completed || u.EventID.String() != bonus.GetMetadata().GetEventId() ||
-		u.EventType != "agrogram.events.v1.BonusAwarded" || u.Version != 7 || u.Transaction.ID != id {
-		t.Fatalf("bonus awarded: update = %+v, completed = %v, err = %v", u, completed, err)
-	}
-
-	// Without completed_at, the completion time is the event's occurred_at.
-	late := transactionEvent(id, farmer, reseller, eventsv1.TransactionState_TRANSACTION_STATE_COMPLETED)
-	late.Transaction.CompletedAt = nil
-	late.Metadata.OccurredAt = timestampOf(testNow.Add(time.Minute))
-	u, completed, err = DecodeTransactionRecord(record(t, TopicTransaction, late, id.String()), v)
-	if err != nil || !completed || !u.Transaction.CompletedAt.Equal(testNow.Add(time.Minute)) {
-		t.Fatalf("completed_at fallback: transaction = %+v, completed = %v, err = %v", u.Transaction, completed, err)
-	}
-
-	// Every state before COMPLETED is skipped: no error, nothing to record.
-	for _, state := range []eventsv1.TransactionState{
-		eventsv1.TransactionState_TRANSACTION_STATE_AWAITING_PAYMENT,
-		eventsv1.TransactionState_TRANSACTION_STATE_PAYMENT_HELD,
-		eventsv1.TransactionState_TRANSACTION_STATE_RECEIPT_SUBMITTED,
-		eventsv1.TransactionState_TRANSACTION_STATE_HANDED_OVER,
-		eventsv1.TransactionState_TRANSACTION_STATE_RECEIVED,
-	} {
-		env := transactionEvent(id, farmer, reseller, state)
-		u, completed, err := DecodeTransactionRecord(record(t, TopicTransaction, env, id.String()), v)
-		if err != nil || completed || u != (domain.TransactionUpdate{}) {
-			t.Fatalf("%s: update = %+v, completed = %v, err = %v; want skipped", state, u, completed, err)
-		}
-	}
-}
-
-// Poison is decided before the state: a record whose snapshot contradicts its
-// metadata is dead-lettered even when it would have been skipped.
-func TestDecodeTransactionRecordPoison(t *testing.T) {
-	v := newValidator(t)
-	id, farmer, reseller := uuid.New(), uuid.New(), uuid.New()
-	completed := func() *eventsv1.TransactionEvent {
-		return transactionEvent(id, farmer, reseller, eventsv1.TransactionState_TRANSACTION_STATE_COMPLETED)
-	}
-	held := func() *eventsv1.TransactionEvent {
-		return transactionEvent(id, farmer, reseller, eventsv1.TransactionState_TRANSACTION_STATE_PAYMENT_HELD)
-	}
-	mutated := func(env *eventsv1.TransactionEvent, mutate func(*eventsv1.TransactionEvent)) *kgo.Record {
-		mutate(env)
-		return record(t, TopicTransaction, env, id.String())
-	}
-	cases := map[string]*kgo.Record{
-		"garbage": {Topic: TopicTransaction, Key: []byte(id.String()), Value: []byte{0xff, 0xff, 0xff}},
-		"content-type": func() *kgo.Record {
-			r := record(t, TopicTransaction, completed(), id.String())
-			r.Headers[0].Value = []byte("application/json")
-			return r
-		}(),
-		"no snapshot": mutated(completed(), func(e *eventsv1.TransactionEvent) { e.Transaction = nil }),
-		"one party on both sides": mutated(completed(), func(e *eventsv1.TransactionEvent) {
-			e.Transaction.ResellerId = farmer.String()
-		}),
-		"wrong aggregate type": mutated(completed(), func(e *eventsv1.TransactionEvent) {
-			e.Metadata.AggregateType = commonv1.ResourceType_RESOURCE_TYPE_USER
-		}),
-		"id mismatch": mutated(completed(), func(e *eventsv1.TransactionEvent) { e.Transaction.Id = uuid.NewString() }),
-		"version mismatch": mutated(completed(), func(e *eventsv1.TransactionEvent) {
-			e.Metadata.AggregateVersion = 7
-		}),
-		"id mismatch before COMPLETED": mutated(held(), func(e *eventsv1.TransactionEvent) {
-			e.Metadata.AggregateId = uuid.NewString()
-		}),
-		"version mismatch before COMPLETED": mutated(held(), func(e *eventsv1.TransactionEvent) {
-			e.Transaction.Version = 2
-		}),
-	}
-	for name, r := range cases {
-		if u, completed, err := DecodeTransactionRecord(r, v); !IsPermanent(err) || completed {
-			t.Errorf("%s: update = %+v, completed = %v, err = %v; want a permanent error", name, u, completed, err)
-		}
-	}
-}
-
-// The handler records a completed transaction keyed by something else than
-// its id (it only warns), and wraps a recorder failure with the event and
-// transaction ids, leaving it retryable.
-func TestTransactionHandler(t *testing.T) {
-	id, farmer, reseller := uuid.New(), uuid.New(), uuid.New()
-	done := transactionEvent(id, farmer, reseller, eventsv1.TransactionState_TRANSACTION_STATE_COMPLETED)
-	rec := &fakeRecorder{}
-	h := NewTransactionHandler(rec, newValidator(t), slog.New(slog.DiscardHandler))
-	if err := h.HandleRecord(context.Background(), record(t, TopicTransaction, done, "not-the-transaction-id")); err != nil {
-		t.Fatal(err)
-	}
-	if calls, outcomes, recorded := rec.snapshot(); len(calls) != 1 || outcomes[0] != domain.Applied || recorded != 1 {
-		t.Fatalf("calls = %+v, outcomes = %v", calls, outcomes)
-	}
-
-	rec.err = errDBDown
-	bonus := bonusAwarded(done)
-	err := h.HandleRecord(context.Background(), record(t, TopicTransaction, bonus, id.String()))
-	if !errors.Is(err, errDBDown) || IsPermanent(err) || !strings.Contains(err.Error(), id.String()) ||
-		!strings.Contains(err.Error(), bonus.GetMetadata().GetEventId()) {
-		t.Fatalf("err = %v, want the recorder's error with the event and transaction ids", err)
 	}
 }
 

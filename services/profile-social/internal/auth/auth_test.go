@@ -18,8 +18,7 @@ func TestFromMetadata(t *testing.T) {
 	user, session := uuid.New(), uuid.New()
 	p, err := FromMetadata(metadata.New(map[string]string{
 		HeaderUserID:         user.String(),
-		HeaderRoles:          " reseller, FARMER ,bogus,,FARMER",
-		HeaderPremium:        "TRUE",
+		HeaderRoles:          " admin, ADMIN ,bogus,,ADMIN",
 		HeaderSessionID:      session.String(),
 		HeaderCaller:         "api-gateway",
 		HeaderRequestID:      "req-123",
@@ -30,12 +29,12 @@ func TestFromMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.UserID != user || !slices.Equal(p.Roles, []commonv1.Role{commonv1.Role_ROLE_RESELLER, commonv1.Role_ROLE_FARMER}) ||
-		!p.Premium || p.SessionID != session.String() || p.Caller != "api-gateway" || p.RequestID != "req-123" ||
+	if p.UserID != user || !slices.Equal(p.Roles, []commonv1.Role{commonv1.Role_ROLE_ADMIN}) ||
+		p.SessionID != session.String() || p.Caller != "api-gateway" || p.RequestID != "req-123" ||
 		p.Traceparent != traceparent || p.Tracestate != "vendor=1" || p.AcceptLanguage != "ru" {
 		t.Fatalf("got %+v", p)
 	}
-	if !p.Authenticated() || !p.Internal() || !p.HasRole(commonv1.Role_ROLE_FARMER) || p.Staff() {
+	if !p.Authenticated() || !p.Internal() || !p.HasRole(commonv1.Role_ROLE_ADMIN) || !p.Staff() {
 		t.Fatalf("helpers disagree: %+v", p)
 	}
 	if p.Actor().GetUserId() != user.String() {
@@ -56,7 +55,7 @@ func TestFromMetadataAnonymousAndSanitized(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p.Authenticated() || p.Internal() || p.Traceparent != "" || p.Tracestate != "" || p.SessionID != "" ||
-		p.Premium || p.AcceptLanguage != "" {
+		p.AcceptLanguage != "" {
 		t.Fatalf("got %+v", p)
 	}
 	if uuid.Validate(p.RequestID) != nil {
@@ -77,7 +76,7 @@ func TestFromMetadataRejectsBadUserID(t *testing.T) {
 }
 
 func TestStaffAndRequireUser(t *testing.T) {
-	admin := Principal{UserID: uuid.New(), Roles: []commonv1.Role{commonv1.Role_ROLE_RESELLER, commonv1.Role_ROLE_ADMIN}}
+	admin := Principal{UserID: uuid.New(), Roles: []commonv1.Role{commonv1.Role_ROLE_ADMIN}}
 	if !admin.Staff() {
 		t.Fatal("ROLE_ADMIN is staff")
 	}
@@ -93,7 +92,7 @@ func TestStaffAndRequireUser(t *testing.T) {
 }
 
 func TestActorOfInternalCall(t *testing.T) {
-	if got := (Principal{Caller: "order-escrow"}).Actor().GetService(); got != "order-escrow" {
+	if got := (Principal{Caller: "catalog"}).Actor().GetService(); got != "catalog" {
 		t.Fatalf("actor = %q", got)
 	}
 }
@@ -101,15 +100,15 @@ func TestActorOfInternalCall(t *testing.T) {
 func TestOutgoingMetadata(t *testing.T) {
 	user, session := uuid.New(), uuid.New()
 	p := Principal{
-		UserID: user, Roles: []commonv1.Role{commonv1.Role_ROLE_RESELLER, commonv1.Role_ROLE_FARMER},
-		Premium: true, SessionID: session.String(), Caller: "api-gateway", RequestID: "req-9",
+		UserID: user, Roles: []commonv1.Role{commonv1.Role_ROLE_ADMIN},
+		SessionID: session.String(), Caller: "api-gateway", RequestID: "req-9",
 		Traceparent: traceparent, Tracestate: "vendor=1", AcceptLanguage: "uz",
 	}
 	md := p.OutgoingMetadata()
 	want := map[string]string{
 		HeaderCaller: ServiceName, HeaderRequestID: "req-9", HeaderTraceparent: traceparent, HeaderTracestate: "vendor=1",
-		HeaderAcceptLanguage: "uz", HeaderUserID: user.String(), HeaderRoles: "RESELLER,FARMER",
-		HeaderPremium: "true", HeaderSessionID: session.String(),
+		HeaderAcceptLanguage: "uz", HeaderUserID: user.String(), HeaderRoles: "ADMIN",
+		HeaderSessionID: session.String(),
 	}
 	for k, v := range want {
 		if got := md.Get(k); len(got) != 1 || got[0] != v {
@@ -121,12 +120,12 @@ func TestOutgoingMetadata(t *testing.T) {
 	}
 	// The round trip gives the same principal, with profile-social as the caller.
 	back, err := FromMetadata(md)
-	if err != nil || back.UserID != user || !slices.Equal(back.Roles, p.Roles) || !back.Premium || back.Caller != ServiceName {
+	if err != nil || back.UserID != user || !slices.Equal(back.Roles, p.Roles) || back.Caller != ServiceName {
 		t.Fatalf("round trip = %+v, %v", back, err)
 	}
 
 	anon := Principal{RequestID: "req-10"}.OutgoingMetadata()
-	if len(anon) != 2 || anon.Get(HeaderUserID) != nil || anon.Get(HeaderPremium) != nil {
+	if len(anon) != 2 || anon.Get(HeaderUserID) != nil {
 		t.Fatalf("anonymous metadata = %v", anon)
 	}
 }

@@ -16,9 +16,7 @@ import (
 
 // Short names for the enum values profile-social works with.
 const (
-	RoleReseller = commonv1.Role_ROLE_RESELLER
-	RoleFarmer   = commonv1.Role_ROLE_FARMER
-	RoleAdmin    = commonv1.Role_ROLE_ADMIN
+	RoleAdmin = commonv1.Role_ROLE_ADMIN
 
 	ListingActive = eventsv1.ListingStatus_LISTING_STATUS_ACTIVE
 )
@@ -36,13 +34,13 @@ var (
 type ProfileStatus int8
 
 const (
-	// ProfilePending: the row exists (an account event or a received rating
-	// created it) but the user has not created the profile yet. Not public.
+	// ProfilePending: the row exists (an account event created it) but the
+	// user has not created the profile yet. Not public.
 	ProfilePending ProfileStatus = iota + 1
 	// ProfileActive: created by the user (CreateProfile). Public.
 	ProfileActive
-	// ProfileDeleted: soft-deleted (DeleteProfile). Not public; the fields,
-	// ratings and transaction history stay, follow edges are removed.
+	// ProfileDeleted: soft-deleted (DeleteProfile). Not public; the fields
+	// stay, follow edges are removed.
 	ProfileDeleted
 )
 
@@ -61,19 +59,9 @@ func (s ProfileStatus) String() string {
 // Account is the account projection: identity's AccountSnapshot as last
 // applied from agrogram.identity.account.v1.
 type Account struct {
-	Roles            []commonv1.Role // sorted, no duplicates
-	IsVerifiedFarmer bool
-	// IsPremium is Premium at the event's occurred_at; PremiumUntil ends it
-	// (identity publishes no event when that moment passes).
-	IsPremium    bool
-	PremiumUntil *time.Time
+	Roles []commonv1.Role // sorted, no duplicates
 	// Version is the applied snapshot's version; 0 = no account event yet.
 	Version int64
-}
-
-// PremiumActive reports whether the Premium badge shows at now.
-func (a Account) PremiumActive(now time.Time) bool {
-	return a.IsPremium && (a.PremiumUntil == nil || now.Before(*a.PremiumUntil))
 }
 
 // ProfileFields are the public fields the user owns.
@@ -94,8 +82,8 @@ const (
 	FieldDistrict    = "district"
 )
 
-// Profile is one profile row: the user's public fields, counters and the
-// account projection.
+// Profile is one profile row: the user's public fields, the follow counters
+// and the account projection.
 type Profile struct {
 	ID     uuid.UUID
 	Status ProfileStatus
@@ -105,7 +93,7 @@ type Profile struct {
 	// creation (uuid.Nil while PENDING).
 	CreateRequestID uuid.UUID
 	// Version is the optimistic-concurrency version: 0 until the user creates
-	// the profile, + 1 on every create, update, delete and received rating.
+	// the profile, + 1 on every create, update and delete.
 	Version   int64
 	CreatedAt time.Time // zero while PENDING
 	UpdatedAt time.Time
@@ -113,38 +101,21 @@ type Profile struct {
 
 	FollowerCount  int64
 	FollowingCount int64
-	RatingCount    int64
-	RatingSum      int64
-	// DealsCount counts completed escrow transactions: + 1 for both parties
-	// when order-escrow's transaction stream reports a transaction COMPLETED
-	// (RecordCompletedTransaction), once per transaction id.
-	DealsCount int64
 
 	Account Account
 
 	// IsFollowedByMe is filled by the repository for the viewer it is given.
 	IsFollowedByMe bool
-	// IsPremium is computed by the service from Account and its clock;
-	// repositories leave it false.
-	IsPremium bool
 }
 
-// NewPendingProfile is the row an account event (or a received rating)
-// creates for a user who has not created a profile yet.
+// NewPendingProfile is the row an account event creates for a user who has
+// not created a profile yet.
 func NewPendingProfile(id uuid.UUID, now time.Time) Profile {
 	return Profile{ID: id, Status: ProfilePending, UpdatedAt: now}
 }
 
 // Public reports whether the profile is visible through the API.
 func (p Profile) Public() bool { return p.Status == ProfileActive }
-
-// RatingAverage is the mean score, 0 when there are no ratings yet.
-func (p Profile) RatingAverage() float64 {
-	if p.RatingCount == 0 {
-		return 0
-	}
-	return float64(p.RatingSum) / float64(p.RatingCount)
-}
 
 // HasRole reports whether the account projection holds r.
 func (p Profile) HasRole(r commonv1.Role) bool { return slices.Contains(p.Account.Roles, r) }
@@ -160,34 +131,16 @@ type AccountUpdate struct {
 	Account    Account
 }
 
-// TransactionUpdate is one decoded record of order-escrow's transaction
-// stream whose snapshot is COMPLETED: the event's identity and the completed
-// transaction it carries.
-type TransactionUpdate struct {
-	EventID    uuid.UUID
-	EventType  string // EventMetadata.event_type
-	Topic      string
-	OccurredAt time.Time
-	// Version is the snapshot's version (= EventMetadata.aggregate_version).
-	Version     int64
-	Transaction CompletedTransaction
-}
-
-// ApplyOutcome is what processing one consumed event did: an account update
-// applied to the account projection, or a transaction update recorded in
-// completed_transactions.
+// ApplyOutcome is what processing one consumed account event did to the
+// account projection.
 type ApplyOutcome int8
 
 const (
-	// Applied: the event changed the state. For an account update, the
-	// snapshot was newer and is now the projection; for a transaction
-	// update, the completed transaction was recorded now.
+	// Applied: the snapshot was newer and is now the projection.
 	Applied ApplyOutcome = iota + 1
-	// Stale: the event was new but changed nothing. For an account update,
-	// the snapshot was not newer than the projection (an older event after a
-	// newer one, or an event that repeats the current version); for a
-	// transaction update, an earlier event had already recorded the
-	// completion (BonusAwarded after PayoutReleased).
+	// Stale: the event was new but changed nothing: the snapshot was not
+	// newer than the projection (an older event after a newer one, or an
+	// event that repeats the current version).
 	Stale
 	// Duplicate: the event id was processed before; nothing changed.
 	Duplicate
@@ -215,40 +168,6 @@ type ProcessedEvent struct {
 	ProcessedAt      time.Time
 }
 
-// CompletedTransaction is a completed escrow transaction between two users,
-// as order-escrow's transaction stream reports it; it unlocks one rating per
-// party.
-type CompletedTransaction struct {
-	ID          uuid.UUID
-	FarmerID    uuid.UUID
-	ResellerID  uuid.UUID
-	CompletedAt time.Time
-}
-
-// Counterparty returns the other party of the transaction for user, and
-// false when user is not a party.
-func (t CompletedTransaction) Counterparty(user uuid.UUID) (uuid.UUID, bool) {
-	switch user {
-	case t.FarmerID:
-		return t.ResellerID, true
-	case t.ResellerID:
-		return t.FarmerID, true
-	}
-	return uuid.Nil, false
-}
-
-// Rating is one user's score for the other party of a completed transaction.
-type Rating struct {
-	ID            uuid.UUID
-	TransactionID uuid.UUID
-	RaterID       uuid.UUID
-	RatedUserID   uuid.UUID
-	RequestID     uuid.UUID
-	Score         int32
-	Comment       string
-	CreatedAt     time.Time
-}
-
 // Cursor is a keyset position in a newest-first list: the sort time and the
 // tie-breaking id of the last item returned.
 type Cursor struct {
@@ -274,14 +193,6 @@ type ProfilePage struct {
 	Profiles      []Profile
 	NextPageToken string
 	TotalSize     int64
-}
-
-// RatingPage is one page of ListRatings plus the aggregate.
-type RatingPage struct {
-	Ratings       []Rating
-	Average       float64
-	Count         int64
-	NextPageToken string
 }
 
 // ListingQuery asks catalog for one owner's listings.

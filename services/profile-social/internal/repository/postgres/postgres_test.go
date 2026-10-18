@@ -22,8 +22,7 @@ var (
 	ctx             = context.Background()
 	profileColNames = []string{"id", "status", "display_name", "avatar_media_id", "bio", "region", "district",
 		"create_request_id", "version", "created_at", "updated_at", "deleted_at",
-		"follower_count", "following_count", "rating_count", "rating_sum", "deals_count",
-		"roles", "is_verified_farmer", "is_premium", "premium_until", "account_version", "is_followed_by_me"}
+		"follower_count", "following_count", "roles", "account_version", "is_followed_by_me"}
 	tashkent = time.FixedZone("UZT", 5*3600)
 )
 
@@ -54,28 +53,24 @@ func TestGetProfileMapsRow(t *testing.T) {
 	mock, store := newMock(t)
 	id, viewer, avatar, req := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	created := time.Date(2026, 9, 24, 15, 0, 0, 0, tashkent)
-	until := created.Add(time.Hour)
 	name, region := "Gulnora", "SURXONDARYO"
 	mock.ExpectQuery(`FROM profiles p WHERE p.id = \$1`).WithArgs(id, viewer).WillReturnRows(
 		mock.NewRows(profileColNames).AddRow(id, "ACTIVE", &name, &avatar, "bio", &region, "Termiz",
 			&req, int64(3), &created, created, (*time.Time)(nil),
-			int64(5), int64(6), int64(2), int64(9), int64(1),
-			[]string{"FARMER", "RESELLER"}, true, true, &until, int64(7), true))
+			int64(5), int64(6), []string{"ADMIN"}, int64(7), true))
 
 	var p domain.Profile
 	run(t, store, func(q service.Queries) (err error) { p, err = q.GetProfile(ctx, id, viewer); return })
 	if p.ID != id || p.Status != domain.ProfileActive || p.DisplayName != "Gulnora" || p.AvatarMediaID != avatar ||
 		p.Region != commonv1.Region_REGION_SURXONDARYO || p.District != "Termiz" || p.CreateRequestID != req ||
-		p.Version != 3 || p.FollowerCount != 5 || p.FollowingCount != 6 || p.RatingCount != 2 || p.RatingSum != 9 ||
-		p.DealsCount != 1 || !p.IsFollowedByMe || p.Account.Version != 7 || !p.Account.IsVerifiedFarmer || !p.Account.IsPremium {
+		p.Version != 3 || p.FollowerCount != 5 || p.FollowingCount != 6 || !p.IsFollowedByMe || p.Account.Version != 7 {
 		t.Fatalf("profile = %+v", p)
 	}
-	if len(p.Account.Roles) != 2 || p.Account.Roles[0] != domain.RoleReseller || p.Account.Roles[1] != domain.RoleFarmer {
-		t.Fatalf("roles = %v, want sorted", p.Account.Roles)
+	if len(p.Account.Roles) != 1 || p.Account.Roles[0] != domain.RoleAdmin {
+		t.Fatalf("roles = %v", p.Account.Roles)
 	}
-	if p.CreatedAt.Location() != time.UTC || !p.CreatedAt.Equal(created) || p.Account.PremiumUntil == nil ||
-		!p.Account.PremiumUntil.Equal(until) || p.DeletedAt != nil {
-		t.Fatalf("times = %s, %v, %v", p.CreatedAt, p.Account.PremiumUntil, p.DeletedAt)
+	if p.CreatedAt.Location() != time.UTC || !p.CreatedAt.Equal(created) || p.DeletedAt != nil {
+		t.Fatalf("times = %s, %v", p.CreatedAt, p.DeletedAt)
 	}
 }
 
@@ -86,7 +81,7 @@ func TestGetProfilePendingRowAndErrors(t *testing.T) {
 	pendingRow := func(status string) *pgxmock.Rows {
 		return mock.NewRows(profileColNames).AddRow(id, status, (*string)(nil), (*uuid.UUID)(nil), "", (*string)(nil), "",
 			(*uuid.UUID)(nil), int64(0), (*time.Time)(nil), now, (*time.Time)(nil),
-			int64(0), int64(0), int64(0), int64(0), int64(0), []string{}, false, false, (*time.Time)(nil), int64(1), false)
+			int64(0), int64(0), []string{}, int64(1), false)
 	}
 	mock.ExpectQuery(`FROM profiles p`).WithArgs(id, uuid.Nil).WillReturnRows(pendingRow("PENDING"))
 	mock.ExpectQuery(`FROM profiles p`).WithArgs(id, uuid.Nil).WillReturnRows(mock.NewRows(profileColNames))
@@ -111,11 +106,11 @@ func TestApplyAccountIsVersionGuarded(t *testing.T) {
 	mock, store := newMock(t)
 	id := uuid.New()
 	now := time.Now().UTC()
-	a := domain.Account{Roles: []commonv1.Role{domain.RoleReseller, domain.RoleFarmer}, IsVerifiedFarmer: true, Version: 4}
+	a := domain.Account{Roles: []commonv1.Role{domain.RoleAdmin}, Version: 4}
 	const sql = `ON CONFLICT \(id\) DO UPDATE .* WHERE profiles.account_version < EXCLUDED.account_version`
-	mock.ExpectExec(sql).WithArgs(id, []string{"RESELLER", "FARMER"}, true, false, (*time.Time)(nil), int64(4), now).
+	mock.ExpectExec(sql).WithArgs(id, []string{"ADMIN"}, int64(4), now).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	mock.ExpectExec(sql).WithArgs(id, []string{"RESELLER", "FARMER"}, true, false, (*time.Time)(nil), int64(4), now).
+	mock.ExpectExec(sql).WithArgs(id, []string{"ADMIN"}, int64(4), now).
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
 
 	run(t, store, func(q service.Queries) error {

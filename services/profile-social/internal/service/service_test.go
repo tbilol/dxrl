@@ -41,9 +41,6 @@ func newHarness(t *testing.T) *harness {
 
 // user is a signed-in principal for a fresh user id.
 func user(roles ...commonv1.Role) auth.Principal {
-	if len(roles) == 0 {
-		roles = []commonv1.Role{domain.RoleReseller}
-	}
 	return auth.Principal{UserID: uuid.Must(uuid.NewV7()), Roles: roles, RequestID: uuid.NewString()}
 }
 
@@ -94,7 +91,7 @@ func TestCreateProfile(t *testing.T) {
 	}
 	if prof.ID != p.UserID || !prof.Public() || prof.DisplayName != "Dilnoza" || prof.Bio != "Olma bog'i" ||
 		prof.District != "Quva" || prof.Version != 1 || !prof.CreatedAt.Equal(start) || prof.AvatarMediaID != f.AvatarMediaID ||
-		prof.Account.Version != 0 || prof.Account.IsVerifiedFarmer {
+		prof.Account.Version != 0 || len(prof.Account.Roles) != 0 {
 		t.Fatalf("profile = %+v", prof)
 	}
 
@@ -204,8 +201,8 @@ func TestDeleteProfile(t *testing.T) {
 	err = h.svc.DeleteProfile(ctx, user(), "")
 	wantErr(t, err, codes.NotFound, commonv1.ErrorReason_ERROR_REASON_NOT_FOUND)
 
-	admin := user(domain.RoleReseller, domain.RoleAdmin)
-	if err := h.svc.DeleteProfile(ctx, admin, a.UserID.String()); err != nil {
+	staff := user(domain.RoleAdmin)
+	if err := h.svc.DeleteProfile(ctx, staff, a.UserID.String()); err != nil {
 		t.Fatal(err)
 	}
 	db := h.store.snapshot()

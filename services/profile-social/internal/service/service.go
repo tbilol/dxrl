@@ -1,7 +1,6 @@
 // Package service is profile-social's business logic: profiles, follows,
-// ratings (unlocked by the completed transactions of order-escrow's
-// transaction stream), the account projection fed by identity's account
-// stream, and a user's listings (read from catalog).
+// the account projection fed by identity's account stream, and a user's
+// listings (read from catalog).
 package service
 
 import (
@@ -59,23 +58,6 @@ type Queries interface {
 	// row when there is none) if a.Version is newer than the stored one, and
 	// reports whether it did.
 	ApplyAccount(ctx context.Context, userID uuid.UUID, a domain.Account, now time.Time) (bool, error)
-
-	GetCompletedTransaction(ctx context.Context, id uuid.UUID) (domain.CompletedTransaction, error)
-	// InsertCompletedTransaction stores t unless its id is recorded; false
-	// when it was.
-	InsertCompletedTransaction(ctx context.Context, t domain.CompletedTransaction, now time.Time) (bool, error)
-	// AddDeal adds one to deals_count of each id.
-	AddDeal(ctx context.Context, ids ...uuid.UUID) error
-	RatingByRequest(ctx context.Context, raterID, requestID uuid.UUID) (domain.Rating, error)
-	// InsertRating stores r; false (nothing stored) when the rater already
-	// rated the transaction or used the request id.
-	InsertRating(ctx context.Context, r domain.Rating) (bool, error)
-	// AddRating adds score to userID's aggregate, bumps the version, sets
-	// updated_at and returns the profile.
-	AddRating(ctx context.Context, userID uuid.UUID, score int32, now time.Time) (domain.Profile, error)
-	// ListRatings returns up to limit ratings userID received, newest first,
-	// strictly after the cursor (nil: from the start).
-	ListRatings(ctx context.Context, userID uuid.UUID, after *domain.Cursor, limit int) ([]domain.Rating, error)
 
 	EnqueueOutbox(ctx context.Context, m events.Message) error
 }
@@ -135,12 +117,6 @@ func New(store Store, limiter RateLimiter, listings ListingSource, opts ...Optio
 // clock returns the current time in UTC with the microsecond precision
 // Postgres stores, so values and page cursors round-trip exactly.
 func (s *Service) clock() time.Time { return s.now().UTC().Truncate(time.Microsecond) }
-
-// present fills the fields computed per request.
-func (s *Service) present(p domain.Profile) domain.Profile {
-	p.IsPremium = p.Account.PremiumActive(s.clock())
-	return p
-}
 
 func notFound(what string, id uuid.UUID) error {
 	return apperr.New(commonv1.ErrorReason_ERROR_REASON_NOT_FOUND, what+" not found", "user_id", id.String())

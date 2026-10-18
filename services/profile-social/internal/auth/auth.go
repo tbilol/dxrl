@@ -9,7 +9,6 @@ import (
 	"context"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -23,7 +22,6 @@ import (
 const (
 	HeaderUserID         = "x-agrogram-user-id"
 	HeaderRoles          = "x-agrogram-roles"
-	HeaderPremium        = "x-agrogram-premium"
 	HeaderSessionID      = "x-agrogram-session-id"
 	HeaderCaller         = "x-agrogram-caller"
 	HeaderRequestID      = "x-request-id"
@@ -48,7 +46,6 @@ var (
 type Principal struct {
 	UserID    uuid.UUID // uuid.Nil: anonymous
 	Roles     []commonv1.Role
-	Premium   bool
 	SessionID string
 	Caller    string // x-agrogram-caller; set on internal calls only
 
@@ -66,7 +63,6 @@ type Principal struct {
 // UNAUTHENTICATED; unknown role names are ignored.
 func FromMetadata(md metadata.MD) (Principal, error) {
 	p := Principal{
-		Premium:        strings.EqualFold(first(md, HeaderPremium), "true"),
 		RequestID:      first(md, HeaderRequestID),
 		Traceparent:    first(md, HeaderTraceparent),
 		Tracestate:     first(md, HeaderTracestate),
@@ -157,7 +153,6 @@ func (p Principal) OutgoingMetadata() metadata.MD {
 	if len(names) > 0 {
 		md.Set(HeaderRoles, strings.Join(names, ","))
 	}
-	md.Set(HeaderPremium, strconv.FormatBool(p.Premium))
 	if p.SessionID != "" {
 		md.Set(HeaderSessionID, p.SessionID)
 	}

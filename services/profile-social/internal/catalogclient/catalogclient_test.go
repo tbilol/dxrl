@@ -69,7 +69,7 @@ func TestListUserListingsForwardsTheCallerAndMapsCards(t *testing.T) {
 	client := New(stub, time.Second)
 
 	viewer, session := uuid.New(), uuid.New()
-	p := auth.Principal{UserID: viewer, Roles: []commonv1.Role{commonv1.Role_ROLE_RESELLER}, SessionID: session.String(),
+	p := auth.Principal{UserID: viewer, Roles: []commonv1.Role{commonv1.Role_ROLE_ADMIN}, SessionID: session.String(),
 		RequestID: "req-5", Traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01", AcceptLanguage: "ru"}
 	page, err := client.ListUserListings(context.Background(), p, domain.ListingQuery{
 		OwnerID: owner, Kind: commonv1.ListingKind_LISTING_KIND_OFFER,
@@ -82,7 +82,7 @@ func TestListUserListingsForwardsTheCallerAndMapsCards(t *testing.T) {
 
 	for k, v := range map[string]string{
 		auth.HeaderCaller: auth.ServiceName, auth.HeaderRequestID: "req-5", auth.HeaderUserID: viewer.String(),
-		auth.HeaderRoles: "RESELLER", auth.HeaderPremium: "false", auth.HeaderSessionID: session.String(),
+		auth.HeaderRoles: "ADMIN", auth.HeaderSessionID: session.String(),
 		auth.HeaderAcceptLanguage: "ru", auth.HeaderTraceparent: p.Traceparent,
 	} {
 		if got := stub.md.Get(k); len(got) != 1 || got[0] != v {

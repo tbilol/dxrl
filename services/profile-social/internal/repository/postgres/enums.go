@@ -44,9 +44,7 @@ func (m enumMap[E]) value(s string) (E, error) {
 
 var (
 	roles = newEnumMap("role", map[commonv1.Role]string{
-		domain.RoleReseller: "RESELLER",
-		domain.RoleFarmer:   "FARMER",
-		domain.RoleAdmin:    "ADMIN",
+		domain.RoleAdmin: "ADMIN",
 	})
 	profileStatuses = newEnumMap("profile status", map[domain.ProfileStatus]string{
 		domain.ProfilePending: "PENDING",

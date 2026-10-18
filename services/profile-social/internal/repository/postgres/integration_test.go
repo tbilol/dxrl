@@ -22,8 +22,6 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 	commonv1 "github.com/tbilol/dxrl/gen/go/common/v1"
-	eventsv1 "github.com/tbilol/dxrl/gen/go/events/v1"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/tbilol/dxrl/services/profile-social/internal/apperr"
 	"github.com/tbilol/dxrl/services/profile-social/internal/auth"
@@ -84,7 +82,7 @@ func setup(t *testing.T) (*pgxpool.Pool, *goose.Provider) {
 }
 
 func principal() auth.Principal {
-	return auth.Principal{UserID: uuid.Must(uuid.NewV7()), Roles: []commonv1.Role{domain.RoleReseller}, RequestID: uuid.NewString()}
+	return auth.Principal{UserID: uuid.Must(uuid.NewV7()), RequestID: uuid.NewString()}
 }
 
 func mustCreate(t *testing.T, svc *service.Service, p auth.Principal, name string) domain.Profile {
@@ -98,24 +96,15 @@ func mustCreate(t *testing.T, svc *service.Service, p auth.Principal, name strin
 	return prof
 }
 
-func account(user uuid.UUID, version int64, farmer bool) domain.AccountUpdate {
-	roles := []commonv1.Role{domain.RoleReseller}
-	if farmer {
-		roles = append(roles, domain.RoleFarmer)
+func account(user uuid.UUID, version int64, admin bool) domain.AccountUpdate {
+	var roles []commonv1.Role
+	if admin {
+		roles = []commonv1.Role{domain.RoleAdmin}
 	}
 	return domain.AccountUpdate{
 		EventID: uuid.Must(uuid.NewV7()), EventType: "agrogram.events.v1.AccountRoleChanged", Topic: events.TopicAccount,
 		OccurredAt: time.Now(), UserID: user,
-		Account: domain.Account{Roles: roles, IsVerifiedFarmer: farmer, Version: version},
-	}
-}
-
-// completion is a decoded COMPLETED transaction-stream record for tx:
-// eventType at version, with a fresh event id.
-func completion(tx domain.CompletedTransaction, eventType string, version int64) domain.TransactionUpdate {
-	return domain.TransactionUpdate{
-		EventID: uuid.Must(uuid.NewV7()), EventType: "agrogram.events.v1." + eventType, Topic: events.TopicTransaction,
-		OccurredAt: time.Now(), Version: version, Transaction: tx,
+		Account: domain.Account{Roles: roles, Version: version},
 	}
 }
 
@@ -149,7 +138,7 @@ func TestIntegrationRepository(t *testing.T) {
 		_, err := svc.GetProfile(ctx, p, p.UserID.String())
 		wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_NOT_FOUND) // PENDING
 		prof := mustCreate(t, svc, p, "Qoraqalpoq")
-		if !prof.Public() || prof.Account.Version != 3 || !prof.Account.IsVerifiedFarmer || prof.Version != 1 {
+		if !prof.Public() || prof.Account.Version != 3 || !prof.HasRole(domain.RoleAdmin) || prof.Version != 1 {
 			t.Fatalf("created = %+v", prof)
 		}
 
@@ -160,7 +149,7 @@ func TestIntegrationRepository(t *testing.T) {
 			t.Fatal(err)
 		}
 		got, err := svc.GetProfile(ctx, early, early.UserID.String())
-		if err != nil || got.DisplayName != "Early" || !got.Account.IsVerifiedFarmer || got.Version != 1 {
+		if err != nil || got.DisplayName != "Early" || !got.HasRole(domain.RoleAdmin) || got.Version != 1 {
 			t.Fatalf("after event = %+v, %v", got, err)
 		}
 		if n, err := store.PurgeProcessedEvents(ctx, time.Now().Add(time.Hour)); err != nil || n < 4 {
@@ -247,87 +236,61 @@ func TestIntegrationRepository(t *testing.T) {
 		wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_NOT_FOUND)
 	})
 
-	t.Run("ratings: eligibility, once per transaction, aggregate and outbox", func(t *testing.T) {
-		farmer, reseller := principal(), principal()
-		mustCreate(t, svc, farmer, "Farmer")
-		mustCreate(t, svc, reseller, "Reseller")
-		_, err := svc.RateUser(ctx, reseller, uuid.NewString(), uuid.NewString(), 5, "")
-		wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_RATING_NOT_ALLOWED)
-
-		// PayoutReleased records the transaction; its redelivery is a
-		// duplicate and BonusAwarded (a new event id) is stale.
-		tx := domain.CompletedTransaction{ID: uuid.New(), FarmerID: farmer.UserID, ResellerID: reseller.UserID, CompletedAt: time.Now()}
-		payout := completion(tx, "PayoutReleased", 6)
-		for i, step := range []struct {
-			u    domain.TransactionUpdate
-			want domain.ApplyOutcome
-		}{
-			{payout, domain.Applied},
-			{payout, domain.Duplicate},
-			{completion(tx, "BonusAwarded", 7), domain.Stale},
-		} {
-			if got, err := svc.RecordCompletedTransaction(ctx, step.u); err != nil || got != step.want {
-				t.Fatalf("record %d = %s, %v; want %s", i+1, got, err, step.want)
-			}
-		}
-		var (
-			topic, eventType string
-			aggregateID      uuid.UUID
-			aggregateVersion int64
-			inboxRows        int
-		)
-		// event_id is the inbox's primary key: one row, however many deliveries.
-		if err := pool.QueryRow(ctx, `
-SELECT topic, event_type, aggregate_id, aggregate_version FROM processed_events WHERE event_id = $1`, payout.EventID).
-			Scan(&topic, &eventType, &aggregateID, &aggregateVersion); err != nil || topic != events.TopicTransaction ||
-			eventType != payout.EventType || aggregateID != tx.ID || aggregateVersion != 6 {
-			t.Fatalf("inbox row of PayoutReleased = %q, %q, %s, %d, %v", topic, eventType, aggregateID, aggregateVersion, err)
-		}
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM processed_events WHERE aggregate_id = $1`, tx.ID).
-			Scan(&inboxRows); err != nil || inboxRows != 2 {
-			t.Fatalf("inbox rows of the transaction = %d, %v; want 2 (PayoutReleased once, BonusAwarded)", inboxRows, err)
-		}
-		for _, p := range []auth.Principal{farmer, reseller} {
-			if prof, err := svc.GetProfile(ctx, p, p.UserID.String()); err != nil || prof.DealsCount != 1 {
-				t.Fatalf("deals of %s = %d, %v; want 1", p.UserID, prof.DealsCount, err)
-			}
-		}
-		reqID := uuid.NewString()
-		r, err := svc.RateUser(ctx, reseller, reqID, tx.ID.String(), 4, "yaxshi")
-		if err != nil {
+	t.Run("outbox: enqueue and relay", func(t *testing.T) {
+		m := events.Message{ID: uuid.Must(uuid.NewV7()), Topic: events.TopicProfile, Key: uuid.NewString(),
+			Value: []byte{0x0a, 0x00}, Headers: map[string]string{events.HeaderContentType: events.ContentType},
+			EventType: "agrogram.events.v1.ProfileUpdated", CreatedAt: time.Now().UTC().Truncate(time.Microsecond)}
+		if err := store.InTx(ctx, func(q service.Queries) error { return q.EnqueueOutbox(ctx, m) }); err != nil {
 			t.Fatal(err)
 		}
-		if again, err := svc.RateUser(ctx, reseller, reqID, tx.ID.String(), 1, ""); err != nil || again.ID != r.ID {
-			t.Fatalf("retry = %+v, %v", again, err)
-		}
-		_, err = svc.RateUser(ctx, reseller, uuid.NewString(), tx.ID.String(), 3, "")
-		wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_ALREADY_RATED)
-
-		prof, err := svc.GetProfile(ctx, reseller, farmer.UserID.String())
-		if err != nil || prof.RatingCount != 1 || prof.RatingAverage() != 4 || prof.DealsCount != 1 || prof.Version != 2 {
-			t.Fatalf("farmer = %+v, %v", prof, err)
-		}
-		page, err := svc.ListRatings(ctx, auth.Principal{}, farmer.UserID.String(), domain.PageRequest{})
-		if err != nil || len(page.Ratings) != 1 || page.Ratings[0].Comment != "yaxshi" || page.Count != 1 {
-			t.Fatalf("ratings = %+v, %v", page, err)
-		}
-
-		// The outbox holds one RatingUpdated for the farmer; the relay's store publishes it.
 		var published []events.Message
 		n, err := store.ProcessOutbox(ctx, 100, func(_ context.Context, msgs []events.Message) error {
 			published = append(published, msgs...)
 			return nil
 		})
-		if err != nil || n != 1 || published[0].Topic != events.TopicProfile || published[0].Key != farmer.UserID.String() {
+		if err != nil || n != 1 || published[0].ID != m.ID || published[0].Key != m.Key {
 			t.Fatalf("outbox = %d, %v, %+v", n, err, published)
-		}
-		var env eventsv1.ProfileEvent
-		if err := proto.Unmarshal(published[0].Value, &env); err != nil || env.GetRatingUpdated().GetScore() != 4 ||
-			env.GetMetadata().GetAggregateVersion() != 2 {
-			t.Fatalf("event = %v, %v", &env, err)
 		}
 		if n, err := store.ProcessOutbox(ctx, 100, func(context.Context, []events.Message) error { return nil }); err != nil || n != 0 {
 			t.Fatalf("second pass = %d, %v", n, err)
+		}
+	})
+
+	t.Run("migration 00002 drops ratings, deals and badges", func(t *testing.T) {
+		exists := func(table string) bool {
+			t.Helper()
+			var found bool
+			if err := pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, table).Scan(&found); err != nil {
+				t.Fatal(err)
+			}
+			return found
+		}
+		if exists("ratings") || exists("completed_transactions") {
+			t.Fatal("00002 must drop ratings and completed_transactions")
+		}
+		res, err := provider.Down(ctx)
+		if err != nil || res.Source.Version != 2 {
+			t.Fatalf("down = %v, %v; want migration 2 rolled back", res, err)
+		}
+		if !exists("ratings") || !exists("completed_transactions") {
+			t.Fatal("down must restore the 00001 schema")
+		}
+		// A role granted before the pivot is removed on the way up.
+		legacy := uuid.New()
+		if _, err := pool.Exec(ctx, `INSERT INTO profiles (id, status, updated_at, roles, is_premium, account_version)
+VALUES ($1, 'PENDING', now(), ARRAY['RESELLER', 'FARMER', 'ADMIN'], true, 1)`, legacy); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := provider.Up(ctx); err != nil {
+			t.Fatalf("up again: %v", err)
+		}
+		var roles []string
+		if err := pool.QueryRow(ctx, `SELECT roles FROM profiles WHERE id = $1`, legacy).Scan(&roles); err != nil ||
+			len(roles) != 1 || roles[0] != "ADMIN" {
+			t.Fatalf("roles after 00002 = %v, %v; want [ADMIN]", roles, err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE profiles SET roles = ARRAY['FARMER'] WHERE id = $1`, legacy); err == nil {
+			t.Fatal("FARMER must violate profiles_roles_check")
 		}
 	})
 
@@ -358,12 +321,6 @@ SELECT topic, event_type, aggregate_id, aggregate_version FROM processed_events 
 		_, err = deadSvc.ApplyAccountEvent(ctx, account(uuid.New(), 1, false))
 		if err == nil || !postgres.IsTransient(err) {
 			t.Fatalf("account event: err = %v, want a transient error", err)
-		}
-		_, err = deadSvc.RecordCompletedTransaction(ctx, completion(domain.CompletedTransaction{
-			ID: uuid.New(), FarmerID: uuid.New(), ResellerID: uuid.New(), CompletedAt: time.Now(),
-		}, "PayoutReleased", 6))
-		if err == nil || !postgres.IsTransient(err) {
-			t.Fatalf("transaction event: err = %v, want a transient error", err)
 		}
 	})
 }

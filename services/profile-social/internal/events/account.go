@@ -92,7 +92,9 @@ func DecodeAccountRecord(r *kgo.Record, v protovalidate.Validator) (domain.Accou
 	if err != nil {
 		return domain.AccountUpdate{}, Permanent(fmt.Errorf("account id: %w", err))
 	}
-	roles := slices.Clone(snap.GetRoles())
+	// ADMIN is the only role left. RESELLER and FARMER (granted before the
+	// listings-only pivot) carry nothing and are dropped.
+	roles := slices.DeleteFunc(slices.Clone(snap.GetRoles()), func(r commonv1.Role) bool { return r != domain.RoleAdmin })
 	slices.Sort(roles)
 	u := domain.AccountUpdate{
 		EventID:    eventID,
@@ -101,15 +103,9 @@ func DecodeAccountRecord(r *kgo.Record, v protovalidate.Validator) (domain.Accou
 		OccurredAt: md.GetOccurredAt().AsTime(),
 		UserID:     userID,
 		Account: domain.Account{
-			Roles:            slices.Compact(roles),
-			IsVerifiedFarmer: snap.GetIsVerifiedFarmer(),
-			IsPremium:        snap.GetIsPremium(),
-			Version:          snap.GetVersion(),
+			Roles:   slices.Compact(roles),
+			Version: snap.GetVersion(),
 		},
-	}
-	if snap.GetPremiumUntil() != nil {
-		t := snap.GetPremiumUntil().AsTime()
-		u.Account.PremiumUntil = &t
 	}
 	return u, nil
 }

@@ -8,16 +8,14 @@ import (
 )
 
 // ApplyAccountEvent applies one event of identity's account stream to the
-// account projection on the user's profile row (roles, verified-farmer and
-// Premium badges), following the consumer rules of metadata.proto:
+// account projection on the user's profile row (roles), following the
+// consumer rules of metadata.proto:
 //
 //   - de-duplication: the event id goes into the inbox (processed_events) in
 //     the same transaction; a known id is a Duplicate and changes nothing;
 //   - versioning: the snapshot is applied only when its version is newer than
 //     the stored account_version, so an older event arriving after a newer
-//     one, and FarmerVerified / FarmerVerificationRejected /
-//     FarmerVerificationExpired (which repeat the current version; the badge
-//     change comes with the AccountRoleChanged after them), are Stale;
+//     one is Stale;
 //   - every event type, including a oneof case newer than this code, takes
 //     this one path: the snapshot is all the projection needs.
 //
@@ -58,7 +56,7 @@ func (s *Service) ApplyAccountEvent(ctx context.Context, u domain.AccountUpdate)
 	}
 	if outcome == domain.Applied {
 		s.log.InfoContext(ctx, "account projection updated", "user_id", u.UserID, "version", u.Account.Version,
-			"event_type", u.EventType, "is_verified_farmer", u.Account.IsVerifiedFarmer, "is_premium", u.Account.IsPremium)
+			"event_type", u.EventType, "roles", u.Account.Roles)
 	}
 	return outcome, nil
 }

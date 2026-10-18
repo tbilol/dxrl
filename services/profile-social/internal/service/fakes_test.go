@@ -23,8 +23,6 @@ type edge struct{ follower, followee uuid.UUID }
 type fakeDB struct {
 	profiles  map[uuid.UUID]domain.Profile
 	follows   map[edge]time.Time
-	txs       map[uuid.UUID]domain.CompletedTransaction
-	ratings   map[uuid.UUID]domain.Rating
 	processed map[uuid.UUID]domain.ProcessedEvent
 	outbox    []events.Message
 	// failWith, when set, makes every statement fail (the database is down).
@@ -35,8 +33,6 @@ func (d *fakeDB) clone() *fakeDB {
 	c := &fakeDB{
 		profiles:  maps.Clone(d.profiles),
 		follows:   maps.Clone(d.follows),
-		txs:       maps.Clone(d.txs),
-		ratings:   maps.Clone(d.ratings),
 		processed: maps.Clone(d.processed),
 		outbox:    slices.Clone(d.outbox),
 		failWith:  d.failWith,
@@ -59,8 +55,6 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{db: &fakeDB{
 		profiles:  map[uuid.UUID]domain.Profile{},
 		follows:   map[edge]time.Time{},
-		txs:       map[uuid.UUID]domain.CompletedTransaction{},
-		ratings:   map[uuid.UUID]domain.Rating{},
 		processed: map[uuid.UUID]domain.ProcessedEvent{},
 	}}
 }
@@ -255,72 +249,6 @@ func (q *fakeQueries) ApplyAccount(_ context.Context, userID uuid.UUID, a domain
 	p.Account = a
 	q.db.profiles[userID] = p
 	return true, nil
-}
-
-func (q *fakeQueries) GetCompletedTransaction(_ context.Context, id uuid.UUID) (domain.CompletedTransaction, error) {
-	t, ok := q.db.txs[id]
-	if !ok {
-		return domain.CompletedTransaction{}, domain.ErrNotFound
-	}
-	return t, nil
-}
-
-func (q *fakeQueries) InsertCompletedTransaction(_ context.Context, t domain.CompletedTransaction, _ time.Time) (bool, error) {
-	if _, ok := q.db.txs[t.ID]; ok {
-		return false, nil
-	}
-	q.db.txs[t.ID] = t
-	return true, nil
-}
-
-func (q *fakeQueries) AddDeal(_ context.Context, ids ...uuid.UUID) error {
-	for _, id := range ids {
-		q.bump(id, func(p *domain.Profile) { p.DealsCount++ })
-	}
-	return nil
-}
-
-func (q *fakeQueries) RatingByRequest(_ context.Context, raterID, requestID uuid.UUID) (domain.Rating, error) {
-	for _, r := range q.db.ratings {
-		if r.RaterID == raterID && r.RequestID == requestID {
-			return r, nil
-		}
-	}
-	return domain.Rating{}, domain.ErrNotFound
-}
-
-func (q *fakeQueries) InsertRating(_ context.Context, r domain.Rating) (bool, error) {
-	for _, o := range q.db.ratings {
-		if (o.TransactionID == r.TransactionID && o.RaterID == r.RaterID) || (o.RaterID == r.RaterID && o.RequestID == r.RequestID) {
-			return false, nil
-		}
-	}
-	q.db.ratings[r.ID] = r
-	return true, nil
-}
-
-func (q *fakeQueries) AddRating(_ context.Context, userID uuid.UUID, score int32, now time.Time) (domain.Profile, error) {
-	p, ok := q.db.profiles[userID]
-	if !ok {
-		return domain.Profile{}, domain.ErrNotFound
-	}
-	p.RatingSum += int64(score)
-	p.RatingCount++
-	p.Version++
-	p.UpdatedAt = now
-	q.db.profiles[userID] = p
-	return p, nil
-}
-
-func (q *fakeQueries) ListRatings(_ context.Context, userID uuid.UUID, after *domain.Cursor, limit int) ([]domain.Rating, error) {
-	var out []domain.Rating
-	for _, r := range q.db.ratings {
-		if r.RatedUserID == userID && (after == nil || before(r.CreatedAt, r.ID, after.At, after.ID)) {
-			out = append(out, r)
-		}
-	}
-	slices.SortFunc(out, func(a, b domain.Rating) int { return newestFirst(a.CreatedAt, a.ID, b.CreatedAt, b.ID) })
-	return out[:min(limit, len(out))], nil
 }
 
 func (q *fakeQueries) EnqueueOutbox(_ context.Context, m events.Message) error {

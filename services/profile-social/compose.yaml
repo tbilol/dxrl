@@ -14,11 +14,9 @@
 # REDIS_PASSWORD, which that .env already defines.
 #
 # profile-social calls no other service at start-up: it consumes identity's
-# account stream (agrogram.identity.account.v1) and order-escrow's transaction
-# stream (agrogram.orderescrow.transaction.v1) from Kafka, and calls catalog
+# account stream (agrogram.identity.account.v1) from Kafka, and calls catalog
 # over gRPC only for ListUserListings, lazily, at catalog:50051. It therefore
-# depends on none of the identity, auth-gateway, catalog or order-escrow
-# containers; to run them too, add their compose files (README.md, "Run
+# depends on none of the identity, auth-gateway or catalog containers; to run them too, add their compose files (README.md, "Run
 # alongside the other services").
 #
 # Needs `make gen` in back/services/profile-social beforehand (the image

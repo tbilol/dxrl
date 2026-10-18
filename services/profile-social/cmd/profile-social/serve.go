@@ -100,17 +100,14 @@ func serve(ctx context.Context) error {
 		return fmt.Errorf("protovalidate: %w", err)
 	}
 
-	// Kafka (optional): the outbox relay and the stream consumer. One group
-	// client reads both consumed streams: identity's account stream (the
-	// account projection) and order-escrow's transaction stream (completed
-	// transactions unlock ratings and count deals). The producer also
-	// publishes dead letters; the consumer commits offsets itself.
+	// Kafka (optional): the outbox relay and the consumer of identity's
+	// account stream (the account projection). The producer also publishes
+	// dead letters; the consumer commits offsets itself.
 	var (
 		producer *kgo.Client
 		consumer *kgo.Client
 		handlers = map[string]events.RecordHandler{
-			events.TopicAccount:     events.NewAccountHandler(svc, validator, log),
-			events.TopicTransaction: events.NewTransactionHandler(svc, validator, log),
+			events.TopicAccount: events.NewAccountHandler(svc, validator, log),
 		}
 	)
 	if len(cfg.KafkaBrokers) > 0 {
@@ -128,11 +125,8 @@ func serve(ctx context.Context) error {
 			kgo.ConsumerGroup(cfg.KafkaConsumerGroup),
 			kgo.ConsumeTopics(slices.Sorted(maps.Keys(handlers))...),
 			kgo.DisableAutoCommit(), // offsets are committed after processing (events.Consumer)
-			// A new group starts at the beginning of the streams, so profiles
-			// catch up with every account identity ever published. A topic
-			// newly added to an existing group has no committed offsets
-			// either, so it too starts at the beginning: that backfills every
-			// completed transaction order-escrow has already published.
+			// A new group starts at the beginning of the stream, so profiles
+			// catch up with every account identity ever published.
 			kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 		)
 		if err != nil {
@@ -140,9 +134,8 @@ func serve(ctx context.Context) error {
 			return fmt.Errorf("kafka consumer: %w", err)
 		}
 	} else {
-		log.Warn("PROFILE_SOCIAL_KAFKA_BROKERS is empty: the stream consumer and the outbox relay are disabled; " +
-			"badges will not update, no completed transaction is recorded (RateUser answers RATING_NOT_ALLOWED) " +
-			"and events stay in the outbox table")
+		log.Warn("PROFILE_SOCIAL_KAFKA_BROKERS is empty: the account-stream consumer and the outbox relay are " +
+			"disabled; account roles will not update and events stay in the outbox table")
 	}
 
 	grpcHealth := grpchealth.NewServer()

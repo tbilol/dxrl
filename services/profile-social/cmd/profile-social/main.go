@@ -1,7 +1,7 @@
 // Command profile-social is the AGROGRAM profile-social service: public
-// profiles, follows, ratings and a user's own listings.
+// profiles, follows and a user's own listings.
 //
-//	profile-social [serve]                  run the gRPC and HTTP servers, the outbox relay and the account/transaction-stream consumer (default)
+//	profile-social [serve]                  run the gRPC and HTTP servers, the outbox relay and the account-stream consumer (default)
 //	profile-social migrate up|down|status   manage the database schema
 //	profile-social healthcheck              GET /readyz; exit 0 when ready (container HEALTHCHECK)
 //

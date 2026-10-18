@@ -90,7 +90,7 @@ func (s *Service) CreateProfile(ctx context.Context, p auth.Principal, requestID
 	// TODO(profile-stream): publish ProfileCreated/ProfileUpdated once
 	// profile.proto has such a case (catalog's owner cards need names and
 	// avatars); today the stream carries RatingUpdated only.
-	return s.present(prof), nil
+	return prof, nil
 }
 
 // GetProfile returns a public profile. PENDING (not created by the user yet)
@@ -113,7 +113,7 @@ func (s *Service) GetProfile(ctx context.Context, p auth.Principal, userID strin
 	case err != nil:
 		return domain.Profile{}, fmt.Errorf("get profile: %w", err)
 	}
-	return s.present(prof), nil
+	return prof, nil
 }
 
 // UpdateProfile changes the fields named in mask on the caller's own ACTIVE
@@ -173,13 +173,13 @@ func (s *Service) UpdateProfile(ctx context.Context, p auth.Principal, profileID
 	if err != nil {
 		return domain.Profile{}, fmt.Errorf("update profile: %w", err)
 	}
-	return s.present(prof), nil
+	return prof, nil
 }
 
 // DeleteProfile soft-deletes a profile: empty userID means the caller's;
 // another user's needs ROLE_ADMIN. The profile leaves lists (its follow
 // edges are removed and the other sides' counters lowered in the same
-// transaction) while its fields, ratings and transaction history stay.
+// transaction) while its fields stay.
 // Deleting a deleted profile is a no-op; a profile that was never created is
 // NOT_FOUND.
 func (s *Service) DeleteProfile(ctx context.Context, p auth.Principal, userID string) error {
