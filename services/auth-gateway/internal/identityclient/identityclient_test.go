@@ -55,10 +55,9 @@ func (s *stubIdentity) GetAccount(ctx context.Context, _ *identityv1.GetAccountR
 
 func activeAccount(id uuid.UUID) *identityv1.Account {
 	return &identityv1.Account{
-		Id:        id.String(),
-		Roles:     []commonv1.Role{commonv1.Role_ROLE_RESELLER, commonv1.Role_ROLE_FARMER},
-		Status:    identityv1.AccountStatus_ACCOUNT_STATUS_ACTIVE,
-		IsPremium: true,
+		Id:     id.String(),
+		Roles:  []commonv1.Role{commonv1.Role_ROLE_ADMIN},
+		Status: identityv1.AccountStatus_ACCOUNT_STATUS_ACTIVE,
 	}
 }
 
@@ -72,10 +71,10 @@ func TestCreateAccountSendsCallerMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if acct.ID != id || !acct.Active() || !acct.IsPremium {
+	if acct.ID != id || !acct.Active() {
 		t.Fatalf("account = %+v", acct)
 	}
-	if got := acct.RoleNames(); len(got) != 2 || got[0] != "RESELLER" || got[1] != "FARMER" {
+	if got := acct.RoleNames(); len(got) != 1 || got[0] != "ADMIN" {
 		t.Fatalf("role names = %v, want the x-agrogram-roles form", got)
 	}
 	// identity accepts CreateAccount from auth-gateway only.

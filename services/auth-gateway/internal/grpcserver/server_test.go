@@ -254,7 +254,7 @@ func TestPrincipalFromMetadata(t *testing.T) {
 	client, _ := dial(t, svc)
 	ctx := metadata.AppendToOutgoingContext(context.Background(),
 		auth.HeaderUserID, userID.String(), auth.HeaderSessionID, sessionID.String(),
-		auth.HeaderRoles, "RESELLER", auth.HeaderRequestID, "req-42")
+		auth.HeaderRoles, "ADMIN", auth.HeaderRequestID, "req-42")
 
 	var header metadata.MD
 	if _, err := client.SignOut(ctx, &authgatewayv1.SignOutRequest{
@@ -278,8 +278,8 @@ func TestVerifyTokenAndJwksMapping(t *testing.T) {
 	expiry := time.Unix(1800000000, 0).UTC()
 	svc := &stubService{
 		verified: service.Verified{
-			UserID: userID, SessionID: sessionID, Premium: true,
-			Roles: []commonv1.Role{commonv1.Role_ROLE_RESELLER, commonv1.Role_ROLE_FARMER}, ExpiresAt: expiry,
+			UserID: userID, SessionID: sessionID,
+			Roles: []commonv1.Role{commonv1.Role_ROLE_ADMIN}, ExpiresAt: expiry,
 		},
 		keys: []token.JSONWebKey{{Kid: "kid-1", Kty: "EC", Alg: "ES256", Use: "sig", Crv: "P-256", X: "x", Y: "y"}},
 	}
@@ -291,8 +291,8 @@ func TestVerifyTokenAndJwksMapping(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := resp.GetPrincipal()
-	if p.GetUserId() != userID.String() || p.GetSessionId() != sessionID.String() || !p.GetIsPremium() ||
-		len(p.GetRoles()) != 2 || !resp.GetExpiresAt().AsTime().Equal(expiry) {
+	if p.GetUserId() != userID.String() || p.GetSessionId() != sessionID.String() ||
+		len(p.GetRoles()) != 1 || !resp.GetExpiresAt().AsTime().Equal(expiry) {
 		t.Fatalf("principal = %v", resp)
 	}
 	if svc.got.Caller != "api-gateway" {

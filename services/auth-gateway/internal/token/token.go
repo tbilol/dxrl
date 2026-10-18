@@ -19,12 +19,12 @@ var (
 // Claims are the access token claims. They are what the api-gateway turns
 // into `x-agrogram-*` metadata, so they mirror common.v1.Principal: `sub` is
 // the user, `sid` the session, `roles` the Role names without the `ROLE_`
-// prefix (exactly the `x-agrogram-roles` form) and `premium` the plan snapshot.
+// prefix (exactly the `x-agrogram-roles` form). There is no plan claim: one
+// flat tier. Tokens issued before carry a `premium` claim, which is ignored.
 type Claims struct {
 	UserID    uuid.UUID
 	SessionID uuid.UUID
 	Roles     []string
-	Premium   bool
 	ID        string // jti
 	IssuedAt  time.Time
 	ExpiresAt time.Time
@@ -35,7 +35,6 @@ type registeredClaims struct {
 	jwt.RegisteredClaims
 	SessionID string   `json:"sid"`
 	Roles     []string `json:"roles,omitempty"`
-	Premium   bool     `json:"premium"`
 }
 
 // Config tunes issuing and verification.
@@ -131,7 +130,6 @@ func (i *Issuer) Issue(c Claims) (string, Claims, error) {
 		},
 		SessionID: c.SessionID.String(),
 		Roles:     c.Roles,
-		Premium:   c.Premium,
 	})
 	tok.Header["kid"] = key.ID
 	signed, err := tok.SignedString(key.Private)
@@ -165,7 +163,6 @@ func (i *Issuer) Verify(raw string) (Claims, error) {
 		UserID:    userID,
 		SessionID: sessionID,
 		Roles:     rc.Roles,
-		Premium:   rc.Premium,
 		ID:        rc.ID,
 	}
 	if rc.IssuedAt != nil {

@@ -43,7 +43,6 @@ type Verified struct {
 	UserID    uuid.UUID
 	SessionID uuid.UUID
 	Roles     []commonv1.Role
-	Premium   bool
 	ExpiresAt time.Time
 }
 
@@ -85,7 +84,6 @@ func (s *Service) issueTokens(ctx context.Context, q Queries, acct identityclien
 		UserID:    acct.ID,
 		SessionID: sessionID,
 		Roles:     acct.RoleNames(),
-		Premium:   acct.IsPremium,
 		IssuedAt:  now,
 	})
 	if err != nil {
@@ -127,8 +125,8 @@ func (s *Service) newRefreshToken(sessionID uuid.UUID, now time.Time) (string, d
 // RefreshToken exchanges a refresh token for a new pair. The old token stops
 // working at once (rotation), and presenting it again revokes the whole
 // session: a stolen token can be used once at most, and the theft is visible.
-// Roles and premium are re-read from identity, so the new access token carries
-// current values.
+// Roles are re-read from identity, so the new access token carries current
+// values.
 func (s *Service) RefreshToken(ctx context.Context, p auth.Principal, secret string) (TokenPair, error) {
 	now := s.clock()
 	hash := token.HashRefreshToken(secret)
@@ -180,7 +178,6 @@ func (s *Service) RefreshToken(ctx context.Context, p auth.Principal, secret str
 		UserID:    acct.ID,
 		SessionID: session.ID,
 		Roles:     acct.RoleNames(),
-		Premium:   acct.IsPremium,
 		IssuedAt:  now,
 	})
 	if err != nil {
@@ -283,8 +280,8 @@ func (s *Service) SignOut(ctx context.Context, p auth.Principal, scope authgatew
 }
 
 // VerifyToken checks an access token for the api-gateway: signature, issuer,
-// audience and expiry locally, then that the session is still live. Roles and
-// premium come from the token (a snapshot from when it was issued), which is
+// audience and expiry locally, then that the session is still live. Roles
+// come from the token (a snapshot from when it was issued), which is
 // what the `x-agrogram-*` headers are defined to carry.
 func (s *Service) VerifyToken(ctx context.Context, p auth.Principal, accessToken string) (Verified, error) {
 	if err := auth.RequireCaller(p, s.cfg.VerifyTokenCaller); err != nil {
@@ -320,7 +317,6 @@ func (s *Service) VerifyToken(ctx context.Context, p auth.Principal, accessToken
 		UserID:    claims.UserID,
 		SessionID: claims.SessionID,
 		Roles:     rolesFromNames(claims.Roles),
-		Premium:   claims.Premium,
 		ExpiresAt: claims.ExpiresAt,
 	}, nil
 }

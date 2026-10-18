@@ -8,8 +8,24 @@ import (
 	"time"
 )
 
+// clearEnv unsets every AUTH_GATEWAY_* variable for the rest of the test, so
+// defaults and missing values are checked even when the caller's environment
+// sets some (make test-integration loads ./.env for every package).
+func clearEnv(t *testing.T) {
+	t.Helper()
+	for _, kv := range os.Environ() {
+		if name, _, _ := strings.Cut(kv, "="); strings.HasPrefix(name, Prefix) {
+			t.Setenv(name, "") // restores the original value after the test
+			if err := os.Unsetenv(name); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
 func setRequired(t *testing.T) {
 	t.Helper()
+	clearEnv(t)
 	t.Setenv("AUTH_GATEWAY_DATABASE_URL", "postgres://auth_gateway:x@localhost:5432/auth_gateway")
 	t.Setenv("AUTH_GATEWAY_IDENTITY_ADDR", "127.0.0.1:15051")
 	t.Setenv("AUTH_GATEWAY_JWT_PRIVATE_KEY", "-----BEGIN EC PRIVATE KEY-----")
@@ -71,6 +87,7 @@ func TestLoadValidates(t *testing.T) {
 
 // A missing signing key must stop the start-up and say how to get one.
 func TestLoadRequiresASigningKey(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("AUTH_GATEWAY_DATABASE_URL", "postgres://x")
 	t.Setenv("AUTH_GATEWAY_IDENTITY_ADDR", "127.0.0.1:15051")
 	_, err := Load()

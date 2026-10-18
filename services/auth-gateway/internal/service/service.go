@@ -3,10 +3,10 @@
 // back them.
 //
 // What this service owns: credentials (argon2id password hashes, Google and
-// Apple links), phone SMS challenges and refresh-token sessions. Accounts,
-// roles and the plan belong to identity, which is called when an account is
-// created and every time a token is issued or refreshed, so an access token
-// always carries live roles and the live premium flag.
+// Apple links), phone SMS challenges and refresh-token sessions. Accounts and
+// roles belong to identity, which is called when an account is created and
+// every time a token is issued or refreshed, so an access token always
+// carries live roles.
 package service
 
 import (

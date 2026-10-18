@@ -119,7 +119,6 @@ func (a *fakeAccounts) CreateAccount(_ context.Context, _ auth.Principal, reques
 	}
 	acct := identityclient.Account{
 		ID:     uuid.New(),
-		Roles:  []commonv1.Role{commonv1.Role_ROLE_RESELLER},
 		Status: identityv1.AccountStatus_ACCOUNT_STATUS_ACTIVE,
 	}
 	a.byRequest[requestID], a.accounts[acct.ID] = acct.ID, acct

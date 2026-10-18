@@ -321,14 +321,11 @@ func (a *fakeAccounts) setStatus(id uuid.UUID, status identityv1.AccountStatus) 
 	a.accounts[id] = acct
 }
 
-func (a *fakeAccounts) setPremium(id uuid.UUID, premium bool, roles ...commonv1.Role) {
+func (a *fakeAccounts) setRoles(id uuid.UUID, roles ...commonv1.Role) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	acct := a.accounts[id]
-	acct.IsPremium = premium
-	if len(roles) > 0 {
-		acct.Roles = roles
-	}
+	acct.Roles = roles
 	a.accounts[id] = acct
 }
 
@@ -343,9 +340,8 @@ func (a *fakeAccounts) CreateAccount(_ context.Context, _ auth.Principal, reques
 		return a.accounts[id], nil
 	}
 	id := uuid.New()
-	acct := identityclient.Account{
+	acct := identityclient.Account{ // a new account holds no role, as identity creates it
 		ID:     id,
-		Roles:  []commonv1.Role{commonv1.Role_ROLE_RESELLER},
 		Status: identityv1.AccountStatus_ACCOUNT_STATUS_ACTIVE,
 	}
 	a.byRequest[requestID] = id

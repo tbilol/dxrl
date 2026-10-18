@@ -61,8 +61,7 @@ func sampleClaims() Claims {
 	return Claims{
 		UserID:    uuid.MustParse("0198e4d0-0000-7000-8000-000000000001"),
 		SessionID: uuid.MustParse("0198e4d0-0000-7000-8000-000000000002"),
-		Roles:     []string{"RESELLER", "FARMER"},
-		Premium:   true,
+		Roles:     []string{"ADMIN"},
 	}
 }
 
@@ -82,8 +81,8 @@ func TestIssueAndVerify(t *testing.T) {
 		t.Fatalf("Verify = %v", err)
 	}
 	want := sampleClaims()
-	if got.UserID != want.UserID || got.SessionID != want.SessionID || !got.Premium ||
-		strings.Join(got.Roles, ",") != "RESELLER,FARMER" || got.ID != issued.ID ||
+	if got.UserID != want.UserID || got.SessionID != want.SessionID ||
+		strings.Join(got.Roles, ",") != "ADMIN" || got.ID != issued.ID ||
 		!got.ExpiresAt.Equal(issued.ExpiresAt) {
 		t.Fatalf("Verify = %+v", got)
 	}
@@ -115,7 +114,10 @@ func TestVerifyRejects(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		tampered := strings.Replace(string(payload), `"premium":true`, `"premium":true,"x":1`, 1)
+		tampered := strings.Replace(string(payload), `"roles":["ADMIN"]`, `"roles":["ADMIN"],"x":1`, 1)
+		if tampered == string(payload) {
+			t.Fatalf("payload %s has no roles claim to tamper with", payload)
+		}
 		parts[1] = base64.RawURLEncoding.EncodeToString([]byte(tampered))
 		if _, err := issuer.Verify(strings.Join(parts, ".")); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("Verify = %v, want ErrInvalid", err)

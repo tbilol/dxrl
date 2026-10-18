@@ -18,8 +18,7 @@ func TestFromMetadata(t *testing.T) {
 	user, session := uuid.New(), uuid.New()
 	p, err := FromMetadata(metadata.New(map[string]string{
 		HeaderUserID:      user.String(),
-		HeaderRoles:       " reseller, FARMER ,bogus,,FARMER",
-		HeaderPremium:     "TRUE",
+		HeaderRoles:       " admin, ADMIN ,bogus,,ADMIN",
 		HeaderSessionID:   session.String(),
 		HeaderCaller:      "api-gateway",
 		HeaderRequestID:   "req-123",
@@ -30,11 +29,11 @@ func TestFromMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Principal{
-		UserID: user, Roles: []commonv1.Role{commonv1.Role_ROLE_RESELLER, commonv1.Role_ROLE_FARMER},
-		Premium: true, SessionID: session, Caller: "api-gateway", RequestID: "req-123",
+		UserID: user, Roles: []commonv1.Role{commonv1.Role_ROLE_ADMIN},
+		SessionID: session, Caller: "api-gateway", RequestID: "req-123",
 		Traceparent: traceparent, Tracestate: "vendor=1",
 	}
-	if p.UserID != want.UserID || !slices.Equal(p.Roles, want.Roles) || p.Premium != want.Premium ||
+	if p.UserID != want.UserID || !slices.Equal(p.Roles, want.Roles) ||
 		p.SessionID != want.SessionID || p.Caller != want.Caller || p.RequestID != want.RequestID ||
 		p.Traceparent != want.Traceparent || p.Tracestate != want.Tracestate {
 		t.Fatalf("got %+v\nwant %+v", p, want)

@@ -4,7 +4,7 @@
 // auth-gateway owns credentials and sessions, never accounts. It calls
 // identity in exactly two places: CreateAccount on a first sign-in, and
 // GetAccount whenever it issues or refreshes tokens, so the access token
-// carries live roles and the live premium flag (back/README.md, "auth-gateway
+// carries live roles (back/README.md, "auth-gateway
 // -> identity when it issues tokens").
 //
 // Every call carries `x-agrogram-caller: auth-gateway` (identity's
@@ -35,10 +35,9 @@ import (
 // Account is the part of agrogram.identity.v1.Account auth-gateway needs: the
 // claims of an access token and the check that the account may be used.
 type Account struct {
-	ID        uuid.UUID
-	Roles     []commonv1.Role
-	Status    identityv1.AccountStatus
-	IsPremium bool
+	ID     uuid.UUID
+	Roles  []commonv1.Role
+	Status identityv1.AccountStatus
 }
 
 // Active reports whether the account may sign in (BLOCKED and DELETED may not).
@@ -124,7 +123,7 @@ func (c *Client) CreateAccount(ctx context.Context, p auth.Principal, requestID 
 	return account(resp.GetAccount())
 }
 
-// GetAccount reads an account's live roles, status and premium flag.
+// GetAccount reads an account's live roles and status.
 func (c *Client) GetAccount(ctx context.Context, p auth.Principal, userID uuid.UUID) (Account, error) {
 	ctx, cancel := c.call(ctx, p)
 	defer cancel()
@@ -148,10 +147,9 @@ func account(pb *identityv1.Account) (Account, error) {
 		return Account{}, apperr.Internal(fmt.Errorf("identity returned an invalid account id %q: %w", pb.GetId(), err))
 	}
 	return Account{
-		ID:        id,
-		Roles:     pb.GetRoles(),
-		Status:    pb.GetStatus(),
-		IsPremium: pb.GetIsPremium(),
+		ID:     id,
+		Roles:  pb.GetRoles(),
+		Status: pb.GetStatus(),
 	}, nil
 }
 

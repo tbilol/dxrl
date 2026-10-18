@@ -20,7 +20,7 @@ and every time it issues or refreshes tokens.
 | `LinkSignInMethod` | the signed-in user | Adds Google, Apple or phone + password to the caller's account |
 | `UnlinkSignInMethod` | the signed-in user | Removes one; the last one cannot go |
 | `ListSignInMethods` | the signed-in user | The caller's methods, with masked display hints |
-| `RefreshToken` | anyone holding the token | Rotates the pair; re-reads roles and premium from identity |
+| `RefreshToken` | anyone holding the token | Rotates the pair; re-reads roles from identity |
 | `SignOut` | the signed-in user | Ends the current session or every session |
 | `VerifyToken` | internal, `x-agrogram-caller: api-gateway` | Signature, `iss`, `aud`, expiry and session; returns `common.v1.Principal` |
 | `GetJwks` | anyone | The public signing keys, as a JWKS document |
@@ -40,9 +40,11 @@ the edge turns into `x-agrogram-*` metadata (`common/v1/auth.proto`):
 | `iss`, `aud` | `AUTH_GATEWAY_JWT_ISSUER` / `_AUDIENCE`; both are checked on verification |
 | `sub` | user id (UUID) |
 | `sid` | session id (UUID) → `x-agrogram-session-id` |
-| `roles` | Role names without `ROLE_`, e.g. `["RESELLER","FARMER"]` → `x-agrogram-roles` |
-| `premium` | plan snapshot → `x-agrogram-premium` |
+| `roles` | Role names without `ROLE_`, e.g. `["ADMIN"]` (omitted when none: posting needs no role) → `x-agrogram-roles` |
 | `iat`, `exp`, `jti` | issued at, expiry, token id |
+
+There is no plan claim (one flat tier). Tokens issued before the
+listings-only pivot carry a `premium` claim, which verification ignores.
 
 Signed with **ES256** (P-256) by default, because the proto's `JsonWebKey`
 documents `kty: "EC"`, `crv: "P-256"`, `alg: "ES256"` and both Envoy and Kong
@@ -74,7 +76,7 @@ subject is looked up; a subject with no credential is a first sign-in, so
 identity's `CreateAccount` is called with a **UUIDv5 request id derived from
 the sign-in identity** (`GOOGLE:<sub>`), which is exactly the idempotency
 identity's proto asks for — a retried or parallel first sign-in can never
-create two accounts. Otherwise `GetAccount` supplies live roles and premium. An
+create two accounts. Otherwise `GetAccount` supplies live roles. An
 account that is BLOCKED or DELETED gets PERMISSION_DENIED /
 `ACCOUNT_DISABLED`; identity being unreachable or slow gets UNAVAILABLE /
 `DEPENDENCY_UNAVAILABLE` after `AUTH_GATEWAY_IDENTITY_TIMEOUT` (never a hang,
@@ -410,7 +412,7 @@ exist yet.
   a reset, PHONE_ALREADY_REGISTERED for a sign-up). The sign-up direction is
   unavoidable given the proto's error list, so the reset direction is honest
   rather than pretending a code was sent.
-- **Roles and premium in a token are a snapshot.** They are refreshed from
+- **Roles in a token are a snapshot.** They are refreshed from
   identity on every refresh, not while a token lives; that is the contract in
   `common/v1/auth.proto`.
 - **Google/Apple account deletion** (revoking the Apple refresh token, removing

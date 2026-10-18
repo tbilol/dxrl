@@ -346,8 +346,8 @@ func TestPhoneSignUpEndToEnd(t *testing.T) {
 		t.Fatalf("sign-up = %+v", res)
 	}
 
-	// The access token verifies and carries the live roles and premium flag.
-	h.accounts.setPremium(res.UserID, true, commonv1.Role_ROLE_RESELLER, commonv1.Role_ROLE_FARMER)
+	// The access token verifies and carries the live roles.
+	h.accounts.setRoles(res.UserID, commonv1.Role_ROLE_ADMIN)
 	refreshed, err := h.svc.RefreshToken(ctx, anon(), res.Tokens.RefreshToken)
 	if err != nil {
 		t.Fatal(err)
@@ -356,8 +356,8 @@ func TestPhoneSignUpEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.UserID != res.UserID || v.SessionID != res.SessionID || !v.Premium ||
-		len(v.Roles) != 2 || v.Roles[0] != commonv1.Role_ROLE_RESELLER {
+	if v.UserID != res.UserID || v.SessionID != res.SessionID ||
+		len(v.Roles) != 1 || v.Roles[0] != commonv1.Role_ROLE_ADMIN {
 		t.Fatalf("verified = %+v", v)
 	}
 

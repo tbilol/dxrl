@@ -153,7 +153,6 @@ func (h *handler) VerifyToken(ctx context.Context, req *authgatewayv1.VerifyToke
 		Principal: &commonv1.Principal{
 			UserId:    v.UserID.String(),
 			Roles:     v.Roles,
-			IsPremium: v.Premium,
 			SessionId: v.SessionID.String(),
 		},
 		ExpiresAt: timestamppb.New(v.ExpiresAt),
