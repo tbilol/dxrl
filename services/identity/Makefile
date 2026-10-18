@@ -1,4 +1,4 @@
-# identity: accounts, role set, e-ijara farmer verification and plan.
+# identity: accounts and the role set.
 #
 # Run every target from this directory (back/services/identity).
 #

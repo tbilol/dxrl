@@ -19,7 +19,7 @@
 #   CMD ["uv", "run", "--no-sync", "python", "-m", "app"]
 #
 # The application package is `app`: generated code occupies top-level
-# names such as `common`, `events` and `analytics` on PYTHONPATH.
+# names such as `common`, `events` and `catalog` on PYTHONPATH.
 #
 # Build context is back/, because the service compiles against gen/ from
 # `make proto-gen`:

@@ -1,9 +1,13 @@
 # AGROGRAM backend
 
 Polyglot microservices backend for **AGROGRAM**, the marketplace that connects
-Uzbek farmers (*dehqon*) with resellers (*olib sotuvchi*). It covers listings,
-e-ijara-verified farmers, escrow-protected transactions (*tranzaksiya*), yield
-estimation and market statistics.
+Uzbek farmers (*dehqon*) with resellers (*olib sotuvchi*). It is
+**listings-only**: users post on two boards (sell offers and buy-requests) and
+contact each other directly (the listing's phone, later chat). There are no
+transactions, escrow, payments, tax, Premium plan or statistics; any signed-in
+user may post on either board, 10 ACTIVE listings per board. Monetization will
+be advertising (later). The agri-calculator and short-video features are
+planned and will be free for everyone.
 
 > **Status: Phase 0, contracts and skeleton only.** This tree holds the service
 > contracts (Protobuf/gRPC and Kafka events), code generation (Docker or a
@@ -26,9 +30,7 @@ flowchart LR
     end
 
     subgraph async["Event-driven (Kafka + gRPC)"]
-        esc["order-escrow · Java"]
         notif["notification · Go"]
-        ana["analytics · Python"]
         media["media-pipeline · Go"]
     end
 
@@ -36,37 +38,35 @@ flowchart LR
     kafka[("Kafka")]
 
     gw --> auth & idn & prof & cat & calc
-    gw --> esc & notif & ana & media
+    gw --> notif & media
     gw -. "WebSocket bridge" .-> rt
     auth --> idn
-    esc --> cat
-    idn & prof & cat & esc & media -- publish --> kafka
-    kafka -- consume --> notif & ana & prof & cat & esc & media
+    prof --> cat
+    idn & cat & media -- publish --> kafka
+    kafka -- consume --> notif & prof
     cdn --- media
 ```
 
 | Service | Lang | Style | Owns |
 | --- | --- | --- | --- |
 | [auth-gateway](services/auth-gateway) | Go | gRPC | Sign-in (Google, Apple/iCloud, phone + password), sessions, token issue and verify, JWKS |
-| [identity](services/identity) | Go | gRPC | Accounts, role set, e-ijara farmer verification, plan entitlements |
-| [profile-social](services/profile-social) | Go | gRPC | Public profiles, follow/unfollow, ratings, a user's own listings |
-| [catalog](services/catalog) | Go | gRPC | Farmer offers and reseller buy-requests, search and filter, product reference data |
-| [agri-calculator](services/agri-calculator) | Python | gRPC | Yield estimate from crop, area (ha / sotix / m²) and seed amount (Premium) |
-| [order-escrow](services/order-escrow) | Java | Kafka + gRPC commands | The *tranzaksiya* escrow state machine |
+| [identity](services/identity) | Go | gRPC | Accounts and the role set (ADMIN only) |
+| [profile-social](services/profile-social) | Go | gRPC | Public profiles, follow/unfollow, a user's own listings |
+| [catalog](services/catalog) | Go | gRPC | Both boards (sell offers and buy-requests, open to any user), search and filter, product reference data |
+| [agri-calculator](services/agri-calculator) | Python | gRPC | Yield estimate from crop, area (ha / sotix / m²) and seed amount. Planned, free for everyone |
 | [notification](services/notification) | Go | Kafka consumer + gRPC | Push, SMS and in-app inbox; preferences |
-| [analytics](services/analytics) | Python | Kafka consumer + gRPC queries | Market statistics (design still being reworked) |
-| [media-pipeline](services/media-pipeline) | Go | gRPC + Kafka jobs | Uploads, short-video transcoding, weighbridge-receipt OCR |
+| [media-pipeline](services/media-pipeline) | Go | gRPC + Kafka jobs | Uploads, image renditions, short-video transcoding (free for everyone) |
 | [signaling](services/signaling) | Go | gRPC stream (stub) | WebRTC call signaling. Later phase, contract stub only |
 | api-gateway | Kong / Envoy | edge | Token validation, `x-agrogram-*` header injection, gRPC↔JSON. Config comes later |
 | edge-cdn | n/a | edge | Delivery of processed media. Config comes later |
 
 - **How traffic flows.** Clients reach services only through the api-gateway.
   Services call each other over gRPC only when they need an immediate answer:
-  auth-gateway → identity when it issues tokens, and order-escrow → catalog to
-  snapshot a listing into a deal. Everything else propagates as Kafka events.
+  auth-gateway → identity when it issues tokens, and profile-social → catalog
+  for a user's listings. Everything else propagates as Kafka events.
 - **Data ownership.** Each service owns its data, and no two services share a
-  database. Read models (listing cards with owner names, profile counters,
-  analytics) are projections that each consumer builds from events.
+  database. Read models (listing cards with owner names, the account roles on
+  profiles) are projections that each consumer builds from events.
 
 <!-- EVENTS: finalized after contracts land -->
 
@@ -84,7 +84,7 @@ back/
 │                              #   (docker-compose.yml, init scripts); see deploy/README.md
 ├── buf.yaml                   # buf module, lint and breaking rules, deps (protovalidate)
 ├── buf.lock                   # pinned dependency versions
-├── buf.gen.yaml               # codegen: Go, Python, Java via BSR remote plugins
+├── buf.gen.yaml               # codegen: Go and Python via BSR remote plugins
 ├── tools/                     # shared codegen tooling, used by back/ and every service:
 │                              #   buf.version (the one pin), codegen.sh (download, verify,
 │                              #   generate, write gen/go/go.mod), gen-go.mod.tmpl, codegen.mk
@@ -115,7 +115,7 @@ make proto-gen        # generate code into gen/ (Docker)
 make proto-gen-local  # the same, with the pinned local buf (no Docker)
 make proto-lint       # style, comment and protovalidate rules
 make proto-format     # rewrite .proto files canonically
-make proto-breaking   # compare with main (after the contracts are committed there)
+make proto-breaking   # compare with master (BREAKING_AGAINST)
 make proto-deps       # refresh buf.lock after changing deps in buf.yaml
 ```
 
@@ -144,8 +144,7 @@ docker run --rm -v "$PWD:/workspace" -w /workspace --user "$(id -u):$(id -g)" \
 | Output | Language / import | Plugins (pinned) | Used by |
 | --- | --- | --- | --- |
 | `gen/go` | `github.com/tbilol/dxrl/gen/go/<dir>/v1`, package `<dir>v1` | `protocolbuffers/go` v1.36.12, `grpc/go` v1.6.2 | auth-gateway, identity, profile-social, catalog, notification, media-pipeline, signaling |
-| `gen/python` | `from catalog.v1 import catalog_pb2`, plus `.pyi` stubs and `buf/validate` | `protocolbuffers/python` + `pyi` v36.2, `grpc/python` v1.84.0 | agri-calculator, analytics |
-| `gen/java` | `uz.agrogram.<dir>.v1` | `protocolbuffers/java` v36.2, `grpc/java` v1.84.0 | order-escrow |
+| `gen/python` | `from catalog.v1 import catalog_pb2`, plus `.pyi` stubs and `buf/validate` | `protocolbuffers/python` + `pyi` v36.2, `grpc/python` v1.84.0 | agri-calculator |
 
 Notes:
 
@@ -153,10 +152,8 @@ Notes:
   - Go: `google.golang.org/protobuf`, `google.golang.org/grpc`,
     `buf.build/go/protovalidate`.
   - Python: `protobuf`, `grpcio`, `protovalidate`.
-  - Java: `com.google.protobuf:protobuf-java`, `io.grpc:grpc-*`,
-    `build.buf:protovalidate`.
 - **Python import names.** Generated Python modules take top-level names
-  (`common`, `events`, `catalog`, `analytics`, …), so Python services keep
+  (`common`, `events`, `catalog`, …), so Python services keep
   their own code in a package named `app`.
 - **Go module path.** It is set once in `buf.gen.yaml` (`go_package_prefix`)
   and derived from this repository's `origin` (`github.com/tbilol/dxrl`).
@@ -181,9 +178,7 @@ These rules apply to every file under `proto/`. Shared building blocks live in
 | `profile-social` | `profilesocial/v1` | `agrogram.profilesocial.v1` | `profile_social.proto` |
 | `catalog` | `catalog/v1` | `agrogram.catalog.v1` | `catalog.proto` |
 | `agri-calculator` | `agricalculator/v1` | `agrogram.agricalculator.v1` | `agri_calculator.proto` |
-| `order-escrow` | `orderescrow/v1` | `agrogram.orderescrow.v1` | `order_escrow.proto` |
 | `notification` | `notification/v1` | `agrogram.notification.v1` | `notification.proto` |
-| `analytics` | `analytics/v1` | `agrogram.analytics.v1` | `analytics.proto` |
 | `media-pipeline` | `mediapipeline/v1` | `agrogram.mediapipeline.v1` | `media_pipeline.proto` |
 | `signaling` | `signaling/v1` | `agrogram.signaling.v1` | `signaling.proto` |
 | *(shared)* | `common/v1` | `agrogram.common.v1` | one file per concept |
@@ -206,7 +201,7 @@ These rules apply to every file under `proto/`. Shared building blocks live in
 
 - Services are named `<Name>Service`. RPCs are named `VerbNoun`: `GetListing`,
   `ListListings`, `SearchListings`, `CreateListing`, `UpdateListing`,
-  `DeleteListing`, plus domain verbs like `ConfirmHandover`.
+  `DeleteListing`, plus domain verbs like `FollowUser`.
 - Every RPC has its own `<Rpc>Request` / `<Rpc>Response`, and
   `google.protobuf.Empty` is never used. This keeps room to add fields later
   and is enforced by buf lint.
@@ -216,7 +211,7 @@ These rules apply to every file under `proto/`. Shared building blocks live in
 - Booleans are `is_*` / `has_*`. Timestamps are `google.protobuf.Timestamp`
   named `*_at`. Civil dates use `common.v1.Date`.
 - Field names follow the JSON the front-end already uses where sensible
-  (`owner_id`, `created_at`, `is_premium`, `is_verified_farmer`). The edge
+  (`owner_id`, `created_at`, `is_followed_by_me`). The edge
   transcodes gRPC to JSON with `preserve_proto_field_names`, so those names
   reach the app unchanged.
 - **Ids** are UUID strings (UUIDv7 preferred). A resource's own id is `id`, and
@@ -238,15 +233,15 @@ These rules apply to every file under `proto/`. Shared building blocks live in
 - **List / Search** take `common.v1.PageRequest` and return
   `common.v1.PageResponse`. Pagination uses cursors; `page_size` 0 means 20,
   and the maximum is 100. Filters are typed fields, not query strings.
-- **Create** and non-idempotent commands (state transitions, pay-in) take
+- **Create** and non-idempotent commands take
   `string request_id`, a client-generated UUID idempotency key. A retry with
   the same key returns the original result.
 - **Update** takes the resource, a `google.protobuf.FieldMask update_mask`, and
   optionally `int64 expected_version` for optimistic concurrency. A stale
   version fails with `ABORTED` / `ERROR_REASON_CONFLICT`. Mutable resources
   expose an output-only `int64 version`.
-- **Delete** is a soft delete wherever history matters (listings referenced by
-  transactions, accounts).
+- **Delete** is a soft delete wherever history matters (listings, profiles,
+  accounts).
 - Fields marked `// Output only.` are set by the server and ignored in
   requests.
 
@@ -268,10 +263,10 @@ IGNORE_IF_ZERO_VALUE`. `buf lint` checks that every annotation is well-formed.
 - A failure is a gRPC status whose `details` hold exactly one
   `agrogram.common.v1.Error` (see `proto/common/v1/error.proto`).
 - The status code follows the table in `ErrorReason`, for example
-  `PLAN_LIMIT_REACHED` → `RESOURCE_EXHAUSTED`.
+  `LISTING_LIMIT_REACHED` → `RESOURCE_EXHAUSTED`.
 - `Error.message` is English and meant for developers. Apps localize text for
   users (uz / ru) by `reason`, and `metadata` carries the numbers the text
-  needs (`{"limit": "5"}`).
+  needs (`{"limit": "10"}`).
 - The same `Error` message is embedded directly in events and batch results.
 
 ### Authentication metadata
@@ -282,28 +277,24 @@ The full contract is in `proto/common/v1/auth.proto`:
 | Header | Value |
 | --- | --- |
 | `x-agrogram-user-id` | user UUID; absent means an anonymous call |
-| `x-agrogram-roles` | e.g. `RESELLER,FARMER` (`common.v1.Role` names without `ROLE_`) |
-| `x-agrogram-premium` | `true` / `false` |
+| `x-agrogram-roles` | e.g. `ADMIN` (`common.v1.Role` names without `ROLE_`); absent when the user holds none |
 | `x-agrogram-session-id` | sign-in session UUID |
 | `x-request-id`, `traceparent`, `accept-language` | correlation, tracing, `uz`/`ru` |
 | `x-agrogram-caller` | calling service name, on internal calls |
 
 - **Authentication** happens at the edge, and **authorization** happens in
-  each service. For example, catalog checks `ROLE_FARMER` before accepting an
-  offer, and agri-calculator checks premium.
-- Every account holds `ROLE_RESELLER`. `ROLE_FARMER` is added after e-ijara
-  verification, so an account can hold both.
-- Roles and premium in headers are a snapshot taken when the token was issued.
-  A service that needs the live value asks identity.
+  each service. Posting needs only a signed-in user (either board, no role);
+  ADMIN (staff) is the only role, for moderation.
+- There is one flat tier: no plan, no Premium, nothing gated on a plan.
+- Roles in headers are a snapshot taken when the token was issued. A service
+  that needs the live value asks identity.
 
 ### Stubs and TODOs
 
-Some parts of the domain are not designed yet: the tax regime, the payment
-provider, weighbridge integration and the bonus rule. These still get fields
-and RPCs so the shape is visible, but they are marked with
-`// TODO(<topic>):` comments. Until they are implemented they return
-`UNIMPLEMENTED` / `ERROR_REASON_NOT_IMPLEMENTED`. Payments are commission-free
-today.
+Some parts of the domain are not designed yet (media-pipeline, chat,
+advertising). Where a contract exists ahead of its implementation it is
+marked with `// TODO(<topic>):` comments and returns `UNIMPLEMENTED` /
+`ERROR_REASON_NOT_IMPLEMENTED` until it is built.
 
 ### Versioning
 
@@ -314,6 +305,11 @@ today.
 - A breaking change goes into a new `v2` package next to `v1`. The service
   serves both until every client has migrated.
 - `make proto-breaking` enforces this with buf's `FILE` rules.
+- The listings-only pivot removed transactions, escrow, premium, farmer
+  verification, ratings and statistics from `v1` in one deliberate break
+  (pre-production, no clients): every removed field number, enum value and
+  oneof case is `reserved` by number and name (a `WIRE_JSON` breaking check
+  passes), and removed RPCs and messages are listed in the service comments.
 
 ### Events (Kafka)
 
@@ -322,15 +318,14 @@ today.
   `agrogram.events.v1`.
 - **Topics.** There is one topic per aggregate stream, named
   `agrogram.<producer>.<aggregate>.v<major>`, for example
-  `agrogram.orderescrow.transaction.v1`. The record key is the aggregate id
-  (a UUID string), which keeps every event about one transaction or listing in
-  order.
+  `agrogram.catalog.listing.v1`. The record key is the aggregate id (a UUID
+  string), which keeps every event about one listing or account in order.
 - **Envelope.** Each topic carries exactly one envelope message,
   `<Aggregate>Event`. It holds `EventMetadata metadata = 1` and a `oneof`
-  containing the concrete event (for example `PaymentHeld`). That gives one
+  containing the concrete event (for example `ListingCreated`). That gives one
   schema per topic, which suits a schema registry, keeps the typing, and makes
   adding an event type a non-breaking change.
-- **Names.** Events are past-tense facts (`PaymentHeld`, `ListingCreated`).
+- **Names.** Events are past-tense facts (`AccountCreated`, `ListingCreated`).
   Request-type events are named `*Requested` (`NotificationRequested`).
 - **Metadata.** `EventMetadata` carries the event id (UUID, used for consumer
   de-duplication), the event type, `occurred_at`, the producer, the aggregate
@@ -351,12 +346,12 @@ today.
 | --- | --- | --- |
 | **0**: contracts (this) | Protos, codegen, scaffolds | Every team builds against the same contracts |
 | **1**: platform | Fill `deploy/docker-compose.yml` (Kafka, Postgres, Redis, MinIO); Kafka, Postgres and Redis are in place, see [deploy/README.md](deploy/README.md). Per-language service chassis: gRPC server, protovalidate interceptor, `Principal` from metadata, `Error` mapping, OpenTelemetry, health, outbox producer, de-duplicating consumer. CI running `make proto` + breaking check. Edge config: JWT, header injection, gRPC↔JSON with `google.api.http` annotations | Removes cross-cutting work from every later phase |
-| **2**: identity + auth-gateway | Accounts, roles, sign-in, tokens, e-ijara verification (integration may start as a stub) | Every other service needs user ids, roles and the premium flag |
-| **3**: catalog + media-pipeline (images) + profile-social | Both boards, product reference, listing photos, profiles, follows | Transactions start from listings; profiles decorate listing cards |
-| **4**: order-escrow + notification | Escrow state machine end to end, with payments stubbed (`TODO(payments)`), weighbridge receipt + OCR, step notifications, ratings unlocked | Needs listings, accounts and media; it is the core business flow |
-| **5**: agri-calculator + analytics | Port the front-end heuristic; build stats projections from listing and transaction streams | Leaf consumers. Analytics needs real event history, and its design is still moving |
-| **6**: signaling | WebRTC calls (plus the chat ownership decision) | Explicitly a later phase |
-| **later** | Payments, tax, bonus rules, premium billing; retire the legacy prototype | Blocked on product and legal decisions (see open questions) |
+| **2**: identity + auth-gateway | Accounts, sign-in, tokens | Every other service needs user ids |
+| **3**: catalog + media-pipeline (images) + profile-social | Both boards, product reference, listing photos, profiles, follows | The listings are the product; profiles decorate listing cards |
+| **4**: notification + chat | Listing and follower notifications; buyer–seller chat | Users contact each other directly |
+| **5**: agri-calculator + short video | Port the front-end heuristic; listing video. Both free for everyone | Leaf features |
+| **6**: signaling | WebRTC calls | Explicitly a later phase |
+| **later** | Advertising (monetization); retire the legacy prototype | Product decisions first |
 
 After each phase, the front-end moves the matching functions in
 `front/src/services/index.js` off the mocks. `USE_MOCK` switches off once

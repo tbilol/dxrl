@@ -23,17 +23,17 @@
 #
 #   infra     protobuf-aware schema registry
 #             minio (S3-compatible object storage for media-pipeline)
-#             clickhouse, pending the analytics redesign
 #             coturn (TURN server for signaling, later phase)
 #   edge      api-gateway (Envoy or Kong): validates JWTs against auth-gateway's
 #             JWKS, strips and injects x-agrogram-* metadata, transcodes
 #             gRPC <-> JSON for the web app (preserve_proto_field_names)
 #             edge-cdn: serves processed media renditions
-#   services  auth-gateway, identity, profile-social, catalog, agri-calculator,
-#             order-escrow, notification, analytics, media-pipeline, signaling;
-#             each built from services/<name>/Dockerfile with context `..`
-#             (back/), gRPC on :50051 and health/metrics on :8081 in-container,
-#             attached to the `agrogram` network
+#   services  agri-calculator, notification, media-pipeline, signaling;
+#             like the built ones (identity, auth-gateway, profile-social,
+#             catalog: services/<name>/compose.yaml), each built from
+#             services/<name>/Dockerfile with context `..` (back/), gRPC on
+#             :50051 and health/metrics on :8081 in-container, attached to the
+#             `agrogram` network
 #
 # Code generation does not use this file: `make proto-gen` runs buf in its own
 # throwaway container (see ../README.md).
@@ -64,7 +64,6 @@ services:
       IDENTITY_DB_PASSWORD: ${IDENTITY_DB_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}
       PROFILE_SOCIAL_DB_PASSWORD: ${PROFILE_SOCIAL_DB_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}
       CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}
-      ORDER_ESCROW_DB_PASSWORD: ${ORDER_ESCROW_DB_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro

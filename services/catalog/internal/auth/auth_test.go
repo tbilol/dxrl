@@ -92,7 +92,7 @@ func TestStaffAndRequireUser(t *testing.T) {
 }
 
 func TestActorOfInternalCall(t *testing.T) {
-	if got := (Principal{Caller: "order-escrow"}).Actor().GetService(); got != "order-escrow" {
+	if got := (Principal{Caller: "profile-social"}).Actor().GetService(); got != "profile-social" {
 		t.Fatalf("actor = %q", got)
 	}
 }

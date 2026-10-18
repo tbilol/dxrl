@@ -117,7 +117,6 @@ All of this is done by `postgres/init/01-create-service-databases.sh`.
 | identity | `identity` | `IDENTITY_DB_PASSWORD` | `postgresql://identity:PASSWORD@127.0.0.1:15432/identity` | `postgresql://identity:PASSWORD@postgres:5432/identity` |
 | profile-social | `profile_social` | `PROFILE_SOCIAL_DB_PASSWORD` | `postgresql://profile_social:PASSWORD@127.0.0.1:15432/profile_social` | `postgresql://profile_social:PASSWORD@postgres:5432/profile_social` |
 | catalog | `catalog` | `CATALOG_DB_PASSWORD` | `postgresql://catalog:PASSWORD@127.0.0.1:15432/catalog` | `postgresql://catalog:PASSWORD@postgres:5432/catalog` |
-| order-escrow | `order_escrow` | `ORDER_ESCROW_DB_PASSWORD` | `postgresql://order_escrow:PASSWORD@127.0.0.1:15432/order_escrow` | `postgresql://order_escrow:PASSWORD@postgres:5432/order_escrow` |
 | *(admin only)* | superuser `postgres`, database `postgres` | `POSTGRES_SUPERUSER_PASSWORD` | `postgresql://postgres:PASSWORD@127.0.0.1:15432/postgres` | `postgresql://postgres:PASSWORD@postgres:5432/postgres` |
 
 The superuser's name is `POSTGRES_SUPERUSER` (default `postgres`). Services
@@ -202,23 +201,23 @@ their partition counts and configs.
 
 | Topic | Partitions | Retention | Key |
 | --- | --- | --- | --- |
-| `agrogram.identity.account.v1` | 3 | 7 days (broker default) | user_id. Planned stream: no `AccountEvent` schema yet |
+| `agrogram.identity.account.v1` | 3 | 7 days (broker default) | user_id |
 | `agrogram.profilesocial.profile.v1` | 3 | 7 days | user_id |
 | `agrogram.catalog.listing.v1` | 3 | 7 days | listing_id |
-| `agrogram.orderescrow.transaction.v1` | 3 | 7 days | transaction_id |
 | `agrogram.mediapipeline.media.v1` | 3 | 7 days | media_id |
 | `agrogram.notification.request.v1` | 3 | 7 days | recipient_id |
 | `agrogram.notification.deadletter.v1` | 1 | 14 days | original key |
-| `agrogram.analytics.deadletter.v1` | 1 | 14 days | original key |
 | `agrogram.profilesocial.deadletter.v1` | 1 | 14 days | original key |
-| `agrogram.catalog.deadletter.v1` | 1 | 14 days | original key |
-| `agrogram.orderescrow.deadletter.v1` | 1 | 14 days | original key |
 | `agrogram.mediapipeline.deadletter.v1` | 1 | 14 days | original key |
 
 All topics have replication factor 1. The stream partition count comes from
 `KAFKA_STREAM_PARTITIONS` and applies only to topics that do not exist yet.
 The list must stay in sync with `proto/events/v1/metadata.proto`. To add a
-topic, add it to both files and run `make infra-up`.
+topic, add it to both files and run `make infra-up`. kafka-init only creates
+topics: one removed from the list (for example the escrow transaction stream
+and the order-escrow, analytics and catalog dead-letter topics, removed with
+the listings-only pivot) stays on an existing broker until it is deleted with
+`kafka-topics.sh --delete`.
 
 CLI, from `back/deploy/`:
 

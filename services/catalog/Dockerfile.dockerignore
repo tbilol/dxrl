@@ -1,7 +1,7 @@
 # BuildKit reads <Dockerfile>.dockerignore next to the Dockerfile instead of
 # back/.dockerignore. The context is back/, but catalog only needs the
 # generated Go code and its own directory: everything else (the legacy
-# prototype in _legacy/, gen/python, gen/java, proto/, deploy/, .git, other
+# prototype in _legacy/, gen/python, proto/, deploy/, .git, other
 # services, local .env files) stays out of the build context.
 *
 !gen/go/

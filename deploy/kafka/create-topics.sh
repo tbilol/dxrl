@@ -26,7 +26,6 @@ stream_topics=(
   agrogram.identity.account.v1
   agrogram.profilesocial.profile.v1
   agrogram.catalog.listing.v1
-  agrogram.orderescrow.transaction.v1
   agrogram.mediapipeline.media.v1
   agrogram.notification.request.v1
 )
@@ -35,10 +34,7 @@ stream_topics=(
 # service, named like its proto dir (no hyphens). Key: the original key.
 deadletter_topics=(
   agrogram.notification.deadletter.v1
-  agrogram.analytics.deadletter.v1
   agrogram.profilesocial.deadletter.v1
-  agrogram.catalog.deadletter.v1
-  agrogram.orderescrow.deadletter.v1
   agrogram.mediapipeline.deadletter.v1
 )
 

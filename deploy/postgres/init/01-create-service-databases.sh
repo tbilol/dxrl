@@ -26,7 +26,7 @@ set -Eeo pipefail
 create_service_databases() {
   # One entry per service that keeps data in PostgreSQL. A new entry also
   # needs its <DATABASE>_DB_PASSWORD in docker-compose.yml and .env.example.
-  local -a databases=(auth_gateway identity profile_social catalog order_escrow)
+  local -a databases=(auth_gateway identity profile_social catalog)
   local db password_var password
 
   # Check everything first, so a bad setting changes nothing.

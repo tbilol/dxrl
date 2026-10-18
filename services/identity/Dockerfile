@@ -33,7 +33,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM gcr.io/distroless/static-debian12:nonroot
 
 LABEL org.opencontainers.image.title="agrogram-identity" \
-      org.opencontainers.image.description="AGROGRAM identity: accounts, roles, e-ijara farmer verification, plan"
+      org.opencontainers.image.description="AGROGRAM identity: accounts and roles"
 
 COPY --from=build /out/identity /identity
 USER nonroot:nonroot
