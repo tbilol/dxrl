@@ -243,7 +243,18 @@ public final class JdbcEscrowStore implements EscrowStore, OutboxStore {
 
         @Override
         public Optional<EscrowTransaction> findTransaction(UUID id, boolean forUpdate) {
-            return jdbc.sql("SELECT " + TRANSACTION_COLUMNS + "WHERE t.id = :id" + (forUpdate ? " FOR UPDATE OF t" : ""))
+            // Lock first, then read in a separate statement: a joined SELECT ... FOR UPDATE OF t
+            // that waits on the lock re-checks only the t row once the holder commits, and keeps
+            // the joined payment/receipt/payout rows from its old snapshot. Under READ COMMITTED
+            // the second statement sees everything the lock holder committed.
+            if (forUpdate && jdbc.sql("SELECT id FROM escrow_transactions WHERE id = :id FOR UPDATE")
+                    .param("id", id)
+                    .query((rs, i) -> rs.getObject(1))
+                    .optional()
+                    .isEmpty()) {
+                return Optional.empty();
+            }
+            return jdbc.sql("SELECT " + TRANSACTION_COLUMNS + "WHERE t.id = :id")
                     .param("id", id)
                     .query(JdbcEscrowStore::mapTransaction)
                     .optional();
