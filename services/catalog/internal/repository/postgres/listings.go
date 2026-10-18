@@ -18,7 +18,7 @@ import (
 // listingCols are the listing columns every read selects, in scanListing's
 // order.
 const listingCols = `l.id, l.kind, l.owner_id, l.product_type, l.quantity_grams, l.quantity_unit,
-	l.remaining_grams, l.price_minor, l.price_currency, l.price_unit, l.phone, l.region, l.district,
+	l.price_minor, l.price_currency, l.price_unit, l.phone, l.region, l.district,
 	l.address_line, l.latitude, l.longitude, l.notes, l.media_ids, l.status, l.views_count, l.version,
 	l.create_request_id, l.created_at, l.updated_at, l.deleted_at`
 
@@ -44,7 +44,7 @@ func scanListing(row pgx.Row, extra ...any) (domain.Listing, error) {
 		lat, lon                      *float64
 	)
 	dest := append([]any{&l.ID, &kind, &l.OwnerID, &product, &l.Quantity.Grams, &quantityUnit,
-		&l.RemainingGrams, &priceMinor, &currency, &pUnit, &l.Phone, &region, &l.Address.District,
+		&priceMinor, &currency, &pUnit, &l.Phone, &region, &l.Address.District,
 		&l.Address.Line, &lat, &lon, &l.Notes, &l.MediaIDs, &status, &l.ViewsCount, &l.Version,
 		&l.CreateRequestID, &l.CreatedAt, &l.UpdatedAt, &l.DeletedAt}, extra...)
 	if err := row.Scan(dest...); err != nil {
@@ -119,7 +119,7 @@ func listingValues(l domain.Listing) ([]any, error) {
 	if media == nil {
 		media = []uuid.UUID{} // NOT NULL; pgx sends a nil slice as NULL
 	}
-	return []any{int32(l.Product), l.Quantity.Grams, quantityUnit, l.RemainingGrams, priceMinor, currency, pUnit,
+	return []any{int32(l.Product), l.Quantity.Grams, quantityUnit, priceMinor, currency, pUnit,
 		l.Phone, region, l.Address.District, l.Address.Line, lat, lon, l.Notes, media}, nil
 }
 
@@ -167,12 +167,12 @@ func (q *queries) InsertListing(ctx context.Context, l domain.Listing, doc domai
 	args = append(args, status, l.ViewsCount, l.Version, l.CreateRequestID, l.CreatedAt, l.UpdatedAt, l.DeletedAt,
 		doc.Product, doc.Place, doc.Notes)
 	_, err = q.db.Exec(ctx, `
-INSERT INTO listings (id, kind, owner_id, product_type, quantity_grams, quantity_unit, remaining_grams,
+INSERT INTO listings (id, kind, owner_id, product_type, quantity_grams, quantity_unit,
 	price_minor, price_currency, price_unit, phone, region, district, address_line, latitude, longitude,
 	notes, media_ids, status, views_count, version, create_request_id, created_at, updated_at, deleted_at,
 	search_document)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-	$23, $24, $25, `+searchDocumentSQL("$26", "$27", "$28")+`)`, args...)
+	$23, $24, `+searchDocumentSQL("$25", "$26", "$27")+`)`, args...)
 	if err != nil {
 		return fmt.Errorf("insert listing: %w", err)
 	}
@@ -202,33 +202,16 @@ func (q *queries) SaveListing(ctx context.Context, l domain.Listing, doc *domain
 	document := "search_document"
 	if doc != nil {
 		args = append(args, doc.Product, doc.Place, doc.Notes)
-		document = searchDocumentSQL("$21", "$22", "$23")
+		document = searchDocumentSQL("$20", "$21", "$22")
 	}
 	tag, err := q.db.Exec(ctx, `
-UPDATE listings SET product_type = $2, quantity_grams = $3, quantity_unit = $4, remaining_grams = $5,
-	price_minor = $6, price_currency = $7, price_unit = $8, phone = $9, region = $10, district = $11,
-	address_line = $12, latitude = $13, longitude = $14, notes = $15, media_ids = $16, status = $17,
-	version = $18, updated_at = $19, deleted_at = $20, search_document = `+document+`
+UPDATE listings SET product_type = $2, quantity_grams = $3, quantity_unit = $4,
+	price_minor = $5, price_currency = $6, price_unit = $7, phone = $8, region = $9, district = $10,
+	address_line = $11, latitude = $12, longitude = $13, notes = $14, media_ids = $15, status = $16,
+	version = $17, updated_at = $18, deleted_at = $19, search_document = `+document+`
 WHERE id = $1`, args...)
 	if err != nil {
 		return fmt.Errorf("save listing: %w", err)
-	}
-	if tag.RowsAffected() != 1 {
-		return domain.ErrNotFound
-	}
-	return nil
-}
-
-func (q *queries) SaveRemaining(ctx context.Context, l domain.Listing) error {
-	status, err := listingStatuses.text(l.Status)
-	if err != nil {
-		return err
-	}
-	tag, err := q.db.Exec(ctx, `
-UPDATE listings SET remaining_grams = $2, status = $3, version = $4, updated_at = $5 WHERE id = $1`,
-		l.ID, l.RemainingGrams, status, l.Version, l.UpdatedAt)
-	if err != nil {
-		return fmt.Errorf("save remaining quantity: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
 		return domain.ErrNotFound

@@ -1,39 +1,23 @@
 // Package events is catalog's Kafka side: it builds the listing events
-// catalog publishes, relays them from the transactional outbox to Kafka, and
-// consumes order-escrow's transaction stream.
+// catalog publishes and relays them from the transactional outbox to Kafka.
+// catalog consumes no stream.
 //
 // Published (outbox table -> Relay):
 //
 //   - agrogram.catalog.listing.v1: ListingEvent (listing.proto), keyed by the
 //     listing id. Today the only case is ListingCreated. TODO(events):
 //     listing.proto has no ListingUpdated / ListingClosed / ListingDeleted
-//     cases yet, so updates, deletions and escrow commitments (remaining
-//     quantity, SOLD_OUT) publish nothing.
-//
-// Consumed (Consumer, consumer group "catalog" by default):
-//
-//   - agrogram.orderescrow.transaction.v1: TransactionEvent
-//     (transaction.proto), keyed by the transaction id. TransactionHandler
-//     hands every event's snapshot to the service, which commits a
-//     transaction's quantity against its listing the first time it sees the
-//     transaction (remaining quantity, SOLD_OUT) and lets the parties read
-//     the listing in any status.
-//
-// Records that cannot be processed are published as DeadLetter to
-// agrogram.catalog.deadletter.v1 (metadata.proto).
+//     cases yet, so updates and deletions publish nothing.
 package events
 
 import (
 	"fmt"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"buf.build/go/protovalidate"
 	"github.com/google/uuid"
 	commonv1 "github.com/tbilol/dxrl/gen/go/common/v1"
 	eventsv1 "github.com/tbilol/dxrl/gen/go/events/v1"
-	"github.com/twmb/franz-go/pkg/kgo"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -42,11 +26,9 @@ import (
 
 // Kafka conventions (proto/events/v1/metadata.proto).
 const (
-	TopicListing     = "agrogram.catalog.listing.v1"
-	TopicTransaction = "agrogram.orderescrow.transaction.v1"
-	TopicDeadLetter  = "agrogram.catalog.deadletter.v1"
-	ProducerName     = "catalog"
-	ContentType      = "application/x-protobuf"
+	TopicListing = "agrogram.catalog.listing.v1"
+	ProducerName = "catalog"
+	ContentType  = "application/x-protobuf"
 
 	HeaderContentType = "content-type"
 	HeaderEventType   = "event-type"
@@ -130,7 +112,7 @@ func Snapshot(l domain.Listing) *eventsv1.ListingSnapshot {
 		OwnerId:           l.OwnerID.String(),
 		Product:           l.Product,
 		Quantity:          l.Quantity.Proto(),
-		RemainingQuantity: l.Remaining().Proto(), // what escrow transactions have not committed
+		RemainingQuantity: l.Quantity.Proto(), // TODO(pivot): still required by listing.proto; dropped with the field
 		Price:             l.Price.Proto(),
 		Address:           l.Address.Proto(),
 		Notes:             l.Notes,
@@ -174,75 +156,4 @@ func newMessage(id uuid.UUID, topic, key string, env proto.Message, md *eventsv1
 		EventType: md.GetEventType(),
 		CreatedAt: occurredAt,
 	}, nil
-}
-
-// maxDeadLetterMessage bounds DeadLetter.error.message.
-const maxDeadLetterMessage = 1000
-
-// NewDeadLetter wraps a record that could not be processed into a DeadLetter
-// record for agrogram.catalog.deadletter.v1, keyed by the original key.
-// Poison records (Permanent errors: undecodable, invalid, or inconsistent with
-// catalog's data) carry ERROR_REASON_VALIDATION_FAILED, records whose retry
-// budget ran out ERROR_REASON_INTERNAL.
-func NewDeadLetter(r *kgo.Record, group string, cause error, attempts int, firstFailedAt, deadLetteredAt time.Time) (*kgo.Record, error) {
-	headers := make(map[string][]byte, len(r.Headers))
-	for _, h := range r.Headers {
-		headers[strings.ToValidUTF8(h.Key, "?")] = h.Value
-	}
-	reason, failure := commonv1.ErrorReason_ERROR_REASON_INTERNAL, "retries_exhausted"
-	if IsPermanent(cause) {
-		reason, failure = commonv1.ErrorReason_ERROR_REASON_VALIDATION_FAILED, "poison"
-	}
-	dl := &eventsv1.DeadLetter{
-		SourceTopic:     r.Topic,
-		SourcePartition: r.Partition,
-		SourceOffset:    r.Offset,
-		Key:             r.Key,
-		Value:           r.Value,
-		Headers:         headers,
-		ConsumerGroup:   group,
-		Error: &commonv1.Error{
-			Reason:   reason,
-			Message:  truncate(strings.ToValidUTF8(cause.Error(), "?"), maxDeadLetterMessage),
-			Domain:   ProducerName,
-			Metadata: map[string]string{"failure": failure},
-		},
-		Attempts:       int32(min(attempts, 1<<30)),
-		FirstFailedAt:  timestamppb.New(firstFailedAt),
-		DeadLetteredAt: timestamppb.New(deadLetteredAt),
-	}
-	if err := protovalidate.Validate(dl); err != nil {
-		return nil, fmt.Errorf("invalid DeadLetter: %w", err)
-	}
-	value, err := proto.Marshal(dl)
-	if err != nil {
-		return nil, fmt.Errorf("marshal DeadLetter: %w", err)
-	}
-	return &kgo.Record{
-		Topic:   TopicDeadLetter,
-		Key:     r.Key,
-		Value:   value,
-		Headers: []kgo.RecordHeader{{Key: HeaderContentType, Value: []byte(ContentType)}},
-	}, nil
-}
-
-// truncate cuts s to at most n bytes on a rune boundary.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
-}
-
-// header returns the value of the record header key ("" when absent).
-func header(r *kgo.Record, key string) string {
-	for _, h := range r.Headers {
-		if h.Key == key {
-			return string(h.Value)
-		}
-	}
-	return ""
 }

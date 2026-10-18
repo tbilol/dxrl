@@ -164,7 +164,7 @@ func sampleListing() domain.Listing {
 			Address:  domain.Address{Region: commonv1.Region_REGION_FARGONA, District: "Quva"},
 			MediaIDs: []uuid.UUID{uuid.New()},
 		},
-		RemainingGrams: 3_500_000, Status: domain.StatusActive, ViewsCount: 12, Version: 3, CreatedAt: now, UpdatedAt: now,
+		Status: domain.StatusActive, ViewsCount: 12, Version: 3, CreatedAt: now, UpdatedAt: now,
 	}
 }
 
@@ -173,7 +173,7 @@ func TestCreateListingMapsRequestAndResponse(t *testing.T) {
 	client, _ := dial(t, svc)
 	user, reqID := uuid.New(), uuid.NewString()
 	ctx := metadata.AppendToOutgoingContext(context.Background(),
-		auth.HeaderUserID, user.String(), auth.HeaderRoles, "RESELLER,FARMER", auth.HeaderPremium, "true",
+		auth.HeaderUserID, user.String(), auth.HeaderRoles, "ADMIN",
 		auth.HeaderRequestID, "req-42")
 	var header metadata.MD
 	in := requestListing()
@@ -181,7 +181,7 @@ func TestCreateListingMapsRequestAndResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if svc.got.UserID != user || !svc.got.Premium || !svc.got.HasRole(domain.RoleFarmer) || svc.got.RequestID != "req-42" ||
+	if svc.got.UserID != user || !svc.got.HasRole(domain.RoleAdmin) || svc.got.RequestID != "req-42" ||
 		svc.id != reqID || svc.kind != domain.KindOffer {
 		t.Fatalf("principal = %+v, request id %s, kind %s", svc.got, svc.id, svc.kind)
 	}
@@ -200,8 +200,7 @@ func TestCreateListingMapsRequestAndResponse(t *testing.T) {
 	out := resp.GetListing()
 	if out.GetId() != l.ID.String() || out.GetOwnerId() != l.OwnerID.String() || out.GetOwner().GetUserId() != l.OwnerID.String() ||
 		out.GetOwner().GetDisplayName() != "" || out.GetPhone() != l.Phone || out.GetStatus() != domain.StatusActive ||
-		out.GetViewsCount() != 12 || out.GetVersion() != 3 || out.GetRemainingQuantity().GetGrams() != 3_500_000 ||
-		out.GetRemainingQuantity().GetDisplayUnit() != domain.UnitTonne || out.GetPrice().GetAmount().GetCurrencyCode() != "UZS" ||
+		out.GetViewsCount() != 12 || out.GetVersion() != 3 || out.GetPrice().GetAmount().GetCurrencyCode() != "UZS" ||
 		len(out.GetMedia()) != 1 || out.GetMedia()[0].GetType() != commonv1.MediaType_MEDIA_TYPE_UNSPECIFIED ||
 		!out.GetCreatedAt().AsTime().Equal(l.CreatedAt) {
 		t.Fatalf("response = %v", out)

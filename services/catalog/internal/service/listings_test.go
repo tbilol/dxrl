@@ -13,27 +13,28 @@ import (
 
 func TestGetListingVisibility(t *testing.T) {
 	e := newEnv()
-	owner := farmer()
+	owner := member()
 	active := e.create(t, owner, domain.KindOffer)
 	closed := e.create(t, owner, domain.KindOffer)
 	e.setStatus(closed.ID, domain.StatusClosed)
 
 	for name, p := range map[string]auth.Principal{
-		"anonymous": {RequestID: "r"}, "other user": reseller(), "owner": owner, "staff": admin(),
+		"anonymous": {RequestID: "r"}, "other user": member(), "owner": owner, "staff": admin(),
 	} {
 		if got, err := e.svc.GetListing(ctx, p, active.ID.String()); err != nil || got.ID != active.ID {
 			t.Fatalf("%s reads ACTIVE: %v", name, err)
 		}
 	}
 	for name, p := range map[string]auth.Principal{
-		"owner": owner, "staff": admin(), "order-escrow": internalCaller("order-escrow"),
+		"owner": owner, "staff": admin(),
 	} {
 		if got, err := e.svc.GetListing(ctx, p, closed.ID.String()); err != nil || got.Status != domain.StatusClosed {
 			t.Fatalf("%s reads CLOSED: %+v, %v", name, got, err)
 		}
 	}
 	for name, p := range map[string]auth.Principal{
-		"anonymous": {RequestID: "r"}, "other user": reseller(), "profile-social": internalCaller("profile-social"),
+		"anonymous": {RequestID: "r"}, "other user": member(), "profile-social": internalCaller("profile-social"),
+		"another service": internalCaller("notification"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := e.svc.GetListing(ctx, p, closed.ID.String())
@@ -48,12 +49,12 @@ func TestGetListingVisibility(t *testing.T) {
 
 func TestGetListingCountsViews(t *testing.T) {
 	e := newEnv()
-	owner := farmer()
+	owner := member()
 	l := e.create(t, owner, domain.KindOffer)
-	viewer := reseller()
+	viewer := member()
 	for _, p := range []auth.Principal{
 		{RequestID: "anon"}, viewer, // counted
-		owner, admin(), internalCaller("order-escrow"), internalCaller("profile-social"), // not counted
+		owner, admin(), internalCaller("notification"), internalCaller("profile-social"), // not counted
 	} {
 		if _, err := e.svc.GetListing(ctx, p, l.ID.String()); err != nil {
 			t.Fatal(err)
@@ -76,7 +77,7 @@ func TestGetListingCountsViews(t *testing.T) {
 
 func TestUpdateListing(t *testing.T) {
 	e := newEnv()
-	owner := farmer()
+	owner := member()
 	l := e.create(t, owner, domain.KindOffer)
 
 	f := domain.ListingFields{
@@ -103,11 +104,11 @@ func TestUpdateListing(t *testing.T) {
 	if err != nil || same.Version != 2 {
 		t.Fatalf("no-op update = %+v, %v", same, err)
 	}
-	// Clearing the price makes it negotiable; quantity drives the remaining quantity.
+	// Clearing the price makes it negotiable.
 	got, err = e.svc.UpdateListing(ctx, owner, l.ID.String(), domain.ListingFields{
 		Quantity: domain.Mass{Grams: 5_000_000, Unit: domain.UnitTonne},
 	}, []string{"price", "quantity"}, 2)
-	if err != nil || got.Price != nil || got.Quantity.Grams != 5_000_000 || got.RemainingGrams != 5_000_000 || got.Version != 3 {
+	if err != nil || got.Price != nil || got.Quantity.Grams != 5_000_000 || got.Version != 3 {
 		t.Fatalf("cleared price = %+v, %v", got, err)
 	}
 	// Stale version.
@@ -129,11 +130,11 @@ func TestUpdateListing(t *testing.T) {
 
 func TestUpdateListingRules(t *testing.T) {
 	e := newEnv()
-	owner := farmer()
+	owner := member()
 	l := e.create(t, owner, domain.KindOffer)
 	notes := domain.ListingFields{Notes: "boshqa"}
 
-	_, err := e.svc.UpdateListing(ctx, reseller(), l.ID.String(), notes, []string{"notes"}, 0)
+	_, err := e.svc.UpdateListing(ctx, member(), l.ID.String(), notes, []string{"notes"}, 0)
 	wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_PERMISSION_DENIED)
 	_, err = e.svc.UpdateListing(ctx, admin(), l.ID.String(), notes, []string{"notes"}, 0)
 	wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_PERMISSION_DENIED)
@@ -168,16 +169,16 @@ func TestUpdateListingRules(t *testing.T) {
 	if ae := wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_LISTING_NOT_ACTIVE); ae.Metadata["status"] != "CLOSED" {
 		t.Fatalf("metadata = %v", ae.Metadata)
 	}
-	_, err = e.svc.UpdateListing(ctx, reseller(), l.ID.String(), notes, []string{"notes"}, 0)
+	_, err = e.svc.UpdateListing(ctx, member(), l.ID.String(), notes, []string{"notes"}, 0)
 	wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_NOT_FOUND)
 }
 
 func TestDeleteListing(t *testing.T) {
 	e := newEnv()
-	owner := farmer()
+	owner := member()
 	l := e.create(t, owner, domain.KindOffer)
 
-	wantReason(t, e.svc.DeleteListing(ctx, reseller(), l.ID.String(), 0), commonv1.ErrorReason_ERROR_REASON_PERMISSION_DENIED)
+	wantReason(t, e.svc.DeleteListing(ctx, member(), l.ID.String(), 0), commonv1.ErrorReason_ERROR_REASON_PERMISSION_DENIED)
 	wantReason(t, e.svc.DeleteListing(ctx, auth.Principal{}, l.ID.String(), 0), commonv1.ErrorReason_ERROR_REASON_UNAUTHENTICATED)
 	wantReason(t, e.svc.DeleteListing(ctx, owner, uuid.NewString(), 0), commonv1.ErrorReason_ERROR_REASON_NOT_FOUND)
 	ae := wantReason(t, e.svc.DeleteListing(ctx, owner, l.ID.String(), 7), commonv1.ErrorReason_ERROR_REASON_CONFLICT)
@@ -200,9 +201,9 @@ func TestDeleteListing(t *testing.T) {
 		t.Fatalf("version after a repeated delete = %d", cur.Version)
 	}
 	// Others no longer see it; the search document is untouched; no event yet.
-	_, err = e.svc.GetListing(ctx, reseller(), l.ID.String())
+	_, err = e.svc.GetListing(ctx, member(), l.ID.String())
 	wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_NOT_FOUND)
-	wantReason(t, e.svc.DeleteListing(ctx, reseller(), l.ID.String(), 0), commonv1.ErrorReason_ERROR_REASON_NOT_FOUND)
+	wantReason(t, e.svc.DeleteListing(ctx, member(), l.ID.String(), 0), commonv1.ErrorReason_ERROR_REASON_NOT_FOUND)
 	if db := e.store.state(); db.docs[l.ID].Product == "" || len(db.outbox) != 1 { // TODO(events): no ListingDeleted
 		t.Fatalf("doc = %+v, outbox = %d", db.docs[l.ID], len(db.outbox))
 	}

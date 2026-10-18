@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/tbilol/dxrl/services/catalog/internal/domain"
-	"github.com/tbilol/dxrl/services/catalog/internal/events"
 )
 
 // clearEnv unsets every CATALOG_* variable for the rest of the test, so the
@@ -39,66 +38,20 @@ func TestLoadDefaults(t *testing.T) {
 		cfg.ViewsBufferSize != 10000 || cfg.ViewsDedupWindow != 24*time.Hour || cfg.OutboxRetention != 168*time.Hour {
 		t.Fatalf("defaults = %+v", cfg)
 	}
-	if cfg.KafkaConsumerGroup != "catalog" || cfg.ConsumerMaxAttempts != 5 ||
-		cfg.ConsumerRetryBackoff != 500*time.Millisecond || cfg.ConsumerRetryBackoffMax != 30*time.Second ||
-		cfg.ConsumerHandleTimeout != 10*time.Second || cfg.ConsumerBatchSize != 100 || cfg.InboxRetention != 720*time.Hour {
-		t.Fatalf("consumer defaults = %+v", cfg)
-	}
-	// The default topic is the contract's (events.TopicTransaction); the
-	// variable only renames it.
-	if cfg.KafkaTransactionTopic != events.TopicTransaction {
-		t.Fatalf("transaction topic = %q, want %q", cfg.KafkaTransactionTopic, events.TopicTransaction)
-	}
-	if cfg.Quotas() != domain.DefaultQuotas {
-		t.Fatalf("quotas = %+v, want the contract's %+v", cfg.Quotas(), domain.DefaultQuotas)
+	if cfg.ListingQuotaPerBoard != domain.DefaultListingQuota {
+		t.Fatalf("listing quota = %d, want the contract's %d", cfg.ListingQuotaPerBoard, domain.DefaultListingQuota)
 	}
 }
 
-func TestConsumerSettings(t *testing.T) {
-	clearEnv(t)
+func TestListingQuotaIsConfigurable(t *testing.T) {
 	t.Setenv("CATALOG_DATABASE_URL", "postgres://x")
-	t.Setenv("CATALOG_KAFKA_BROKERS", "kafka:9092")
-	t.Setenv("CATALOG_KAFKA_CONSUMER_GROUP", "catalog-blue")
-	t.Setenv("CATALOG_KAFKA_TRANSACTION_TOPIC", "staging.orderescrow.transaction.v1")
-	t.Setenv("CATALOG_CONSUMER_MAX_ATTEMPTS", "3")
-	t.Setenv("CATALOG_CONSUMER_RETRY_BACKOFF", "1s")
-	t.Setenv("CATALOG_CONSUMER_RETRY_BACKOFF_MAX", "1s")
-	t.Setenv("CATALOG_CONSUMER_HANDLE_TIMEOUT", "5s")
-	t.Setenv("CATALOG_CONSUMER_BATCH_SIZE", "10")
-	t.Setenv("CATALOG_INBOX_RETENTION", "0")
+	t.Setenv("CATALOG_LISTING_QUOTA_PER_BOARD", "3")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.KafkaConsumerGroup != "catalog-blue" || cfg.KafkaTransactionTopic != "staging.orderescrow.transaction.v1" ||
-		cfg.ConsumerMaxAttempts != 3 || cfg.ConsumerRetryBackoff != time.Second || cfg.ConsumerRetryBackoffMax != time.Second ||
-		cfg.ConsumerHandleTimeout != 5*time.Second || cfg.ConsumerBatchSize != 10 || cfg.InboxRetention != 0 {
-		t.Fatalf("consumer settings = %+v", cfg)
-	}
-
-	// Without brokers there is no consumer, so its group and topic may be blank.
-	clearEnv(t)
-	t.Setenv("CATALOG_DATABASE_URL", "postgres://x")
-	t.Setenv("CATALOG_KAFKA_CONSUMER_GROUP", " ")
-	t.Setenv("CATALOG_KAFKA_TRANSACTION_TOPIC", " ")
-	if _, err := Load(); err != nil {
-		t.Fatalf("no brokers: %v", err)
-	}
-}
-
-func TestQuotasAreConfigurable(t *testing.T) {
-	t.Setenv("CATALOG_DATABASE_URL", "postgres://x")
-	t.Setenv("CATALOG_OFFER_QUOTA_DEFAULT", "2")
-	t.Setenv("CATALOG_OFFER_QUOTA_PREMIUM", "7")
-	t.Setenv("CATALOG_BUY_REQUEST_QUOTA_DEFAULT", "3")
-	t.Setenv("CATALOG_BUY_REQUEST_QUOTA_PREMIUM", "9")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := domain.Quotas{OfferDefault: 2, OfferPremium: 7, BuyRequestDefault: 3, BuyRequestPremium: 9}
-	if cfg.Quotas() != want {
-		t.Fatalf("quotas = %+v, want %+v", cfg.Quotas(), want)
+	if cfg.ListingQuotaPerBoard != 3 {
+		t.Fatalf("listing quota = %d, want 3", cfg.ListingQuotaPerBoard)
 	}
 }
 
@@ -118,7 +71,7 @@ func TestLoadListsEveryProblem(t *testing.T) {
 
 func TestLoadValidates(t *testing.T) {
 	t.Setenv("CATALOG_DATABASE_URL", "postgres://x")
-	t.Setenv("CATALOG_OFFER_QUOTA_PREMIUM", "0")
+	t.Setenv("CATALOG_LISTING_QUOTA_PER_BOARD", "0")
 	t.Setenv("CATALOG_CREATE_RATE_LIMIT", "0")
 	t.Setenv("CATALOG_LOG_FORMAT", "xml")
 	t.Setenv("CATALOG_VIEWS_DEDUP_WINDOW", "-1h")
@@ -127,31 +80,7 @@ func TestLoadValidates(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an error")
 	}
-	for _, want := range []string{"OFFER_QUOTA_PREMIUM", "CREATE_RATE_LIMIT", "LOG_FORMAT", "VIEWS_DEDUP_WINDOW", "VIEWS_FLUSH_INTERVAL"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q does not mention %s", err, want)
-		}
-	}
-}
-
-func TestLoadValidatesConsumerSettings(t *testing.T) {
-	t.Setenv("CATALOG_DATABASE_URL", "postgres://x")
-	t.Setenv("CATALOG_KAFKA_BROKERS", "a:9092")
-	// An empty value means the default (caarlos0/env); only blanks are empty.
-	t.Setenv("CATALOG_KAFKA_CONSUMER_GROUP", " ")
-	t.Setenv("CATALOG_KAFKA_TRANSACTION_TOPIC", "\t")
-	t.Setenv("CATALOG_CONSUMER_MAX_ATTEMPTS", "0")
-	t.Setenv("CATALOG_CONSUMER_BATCH_SIZE", "0")
-	t.Setenv("CATALOG_CONSUMER_RETRY_BACKOFF", "10s")
-	t.Setenv("CATALOG_CONSUMER_RETRY_BACKOFF_MAX", "1s")
-	t.Setenv("CATALOG_CONSUMER_HANDLE_TIMEOUT", "0s")
-	t.Setenv("CATALOG_INBOX_RETENTION", "-1h")
-	_, err := Load()
-	if err == nil {
-		t.Fatal("want an error")
-	}
-	for _, want := range []string{"CATALOG_KAFKA_CONSUMER_GROUP", "CATALOG_KAFKA_TRANSACTION_TOPIC", "CONSUMER_MAX_ATTEMPTS",
-		"CONSUMER_BATCH_SIZE", "CONSUMER_RETRY_BACKOFF_MAX must be >=", "CONSUMER_HANDLE_TIMEOUT", "INBOX_RETENTION"} {
+	for _, want := range []string{"LISTING_QUOTA_PER_BOARD", "CREATE_RATE_LIMIT", "LOG_FORMAT", "VIEWS_DEDUP_WINDOW", "VIEWS_FLUSH_INTERVAL"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q does not mention %s", err, want)
 		}

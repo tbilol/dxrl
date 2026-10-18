@@ -56,14 +56,10 @@ func user(roles ...commonv1.Role) auth.Principal {
 	return auth.Principal{UserID: uuid.Must(uuid.NewV7()), Roles: roles, RequestID: uuid.NewString()}
 }
 
-func farmer() auth.Principal   { return user(domain.RoleReseller, domain.RoleFarmer) }
-func reseller() auth.Principal { return user(domain.RoleReseller) }
-func admin() auth.Principal    { return user(domain.RoleReseller, domain.RoleAdmin) }
-
-func premium(p auth.Principal) auth.Principal {
-	p.Premium = true
-	return p
-}
+// member is a signed-in user without roles: every account may post on
+// either board.
+func member() auth.Principal { return user() }
+func admin() auth.Principal  { return user(domain.RoleAdmin) }
 
 func internalCaller(name string) auth.Principal {
 	return auth.Principal{Caller: name, RequestID: uuid.NewString()}
@@ -91,7 +87,7 @@ func (e env) create(t *testing.T, p auth.Principal, kind commonv1.ListingKind) d
 }
 
 // setStatus changes a stored listing's status directly (states catalog has
-// no RPC for yet: CLOSED, SOLD_OUT, BLOCKED).
+// no RPC for yet: CLOSED, BLOCKED).
 func (e env) setStatus(id uuid.UUID, st eventsv1.ListingStatus) {
 	e.store.update(func(d *fakeDB) {
 		l := d.listings[id]
@@ -114,7 +110,7 @@ func wantReason(t *testing.T, err error, reason commonv1.ErrorReason) *apperr.Er
 
 func TestCreateOffer(t *testing.T) {
 	e := newEnv()
-	p := farmer()
+	p := member()
 	p.Traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 	reqID := uuid.NewString()
 	l, err := e.svc.CreateListing(ctx, p, reqID, domain.KindOffer, fields())
@@ -122,7 +118,7 @@ func TestCreateOffer(t *testing.T) {
 		t.Fatal(err)
 	}
 	if l.OwnerID != p.UserID || l.Kind != domain.KindOffer || l.Status != domain.StatusActive || l.Version != 1 ||
-		l.RemainingGrams != l.Quantity.Grams || l.CreateRequestID.String() != reqID || l.CreatedAt.IsZero() ||
+		l.CreateRequestID.String() != reqID || l.CreatedAt.IsZero() ||
 		!l.CreatedAt.Equal(l.UpdatedAt) || l.DeletedAt != nil || l.ViewsCount != 0 || l.ID.Version() != 7 {
 		t.Fatalf("listing = %+v", l)
 	}
@@ -150,71 +146,53 @@ func TestCreateOffer(t *testing.T) {
 	}
 }
 
-func TestCreateListingRoles(t *testing.T) {
+func TestCreateListingNeedsAUserAndABoard(t *testing.T) {
 	cases := map[string]struct {
 		p      auth.Principal
 		kind   commonv1.ListingKind
 		reason commonv1.ErrorReason
 	}{
 		"anonymous":                  {auth.Principal{RequestID: "r"}, domain.KindBuyRequest, commonv1.ErrorReason_ERROR_REASON_UNAUTHENTICATED},
-		"offer by a reseller":        {reseller(), domain.KindOffer, commonv1.ErrorReason_ERROR_REASON_FARMER_VERIFICATION_REQUIRED},
-		"offer by premium staff":     {premium(admin()), domain.KindOffer, commonv1.ErrorReason_ERROR_REASON_FARMER_VERIFICATION_REQUIRED},
-		"buy-request without role":   {user(domain.RoleFarmer), domain.KindBuyRequest, commonv1.ErrorReason_ERROR_REASON_PERMISSION_DENIED},
-		"no roles at all":            {user(), domain.KindBuyRequest, commonv1.ErrorReason_ERROR_REASON_PERMISSION_DENIED},
-		"kind missing (direct call)": {farmer(), commonv1.ListingKind_LISTING_KIND_UNSPECIFIED, commonv1.ErrorReason_ERROR_REASON_VALIDATION_FAILED},
+		"kind missing (direct call)": {member(), commonv1.ListingKind_LISTING_KIND_UNSPECIFIED, commonv1.ErrorReason_ERROR_REASON_VALIDATION_FAILED},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv()
 			_, err := e.svc.CreateListing(ctx, tc.p, uuid.NewString(), tc.kind, fields())
-			ae := wantReason(t, err, tc.reason)
-			if tc.reason == commonv1.ErrorReason_ERROR_REASON_FARMER_VERIFICATION_REQUIRED &&
-				(ae.Code != codes.FailedPrecondition || ae.Metadata["listing_kind"] != "OFFER") {
-				t.Fatalf("error = %+v", ae)
-			}
+			wantReason(t, err, tc.reason)
 			if db := e.store.state(); len(db.listings) != 0 || len(db.outbox) != 0 || len(e.limiter.keys) != 0 {
 				t.Fatalf("rejected call left state: %d listings, %d events, %d rate-limit hits",
 					len(db.listings), len(db.outbox), len(e.limiter.keys))
 			}
 		})
 	}
-	// Both roles: both boards.
+}
+
+// Any signed-in user may post on either board; no role is needed.
+func TestAnyUserMayPostOnEitherBoard(t *testing.T) {
 	e := newEnv()
-	p := farmer()
+	p := member()
 	e.create(t, p, domain.KindOffer)
 	e.create(t, p, domain.KindBuyRequest)
 }
 
 func TestCreateListingQuotas(t *testing.T) {
-	cases := []struct {
-		kind    commonv1.ListingKind
-		premium bool
-		limit   int
-		plan    string
-	}{
-		{domain.KindOffer, false, 5, "default"},
-		{domain.KindOffer, true, 20, "premium"},
-		{domain.KindBuyRequest, false, 5, "default"},
-		{domain.KindBuyRequest, true, 25, "premium"},
-	}
-	for _, tc := range cases {
-		name := strings.TrimPrefix(tc.kind.String(), "LISTING_KIND_") + "/" + tc.plan
-		t.Run(name, func(t *testing.T) {
+	for _, kind := range []commonv1.ListingKind{domain.KindOffer, domain.KindBuyRequest} {
+		t.Run(strings.TrimPrefix(kind.String(), "LISTING_KIND_"), func(t *testing.T) {
 			e := newEnv()
-			p := farmer()
-			p.Premium = tc.premium
-			for range tc.limit {
-				e.create(t, p, tc.kind)
+			p := member()
+			for range domain.DefaultListingQuota {
+				e.create(t, p, kind)
 			}
-			_, err := e.svc.CreateListing(ctx, p, uuid.NewString(), tc.kind, fields())
+			_, err := e.svc.CreateListing(ctx, p, uuid.NewString(), kind, fields())
 			ae := wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_PLAN_LIMIT_REACHED)
-			if ae.Code != codes.ResourceExhausted || ae.Metadata["plan"] != tc.plan ||
-				ae.Metadata["listing_kind"] != strings.TrimPrefix(tc.kind.String(), "LISTING_KIND_") ||
-				ae.Metadata["limit"] != strconv.Itoa(tc.limit) {
+			if ae.Code != codes.ResourceExhausted ||
+				ae.Metadata["listing_kind"] != strings.TrimPrefix(kind.String(), "LISTING_KIND_") ||
+				ae.Metadata["limit"] != strconv.Itoa(domain.DefaultListingQuota) || len(ae.Metadata) != 2 {
 				t.Fatalf("error = %+v", ae)
 			}
-			if db := e.store.state(); len(db.listings) != tc.limit || len(db.outbox) != tc.limit {
-				t.Fatalf("stored %d listings, %d events; want %d", len(db.listings), len(db.outbox), tc.limit)
+			if db := e.store.state(); len(db.listings) != domain.DefaultListingQuota || len(db.outbox) != domain.DefaultListingQuota {
+				t.Fatalf("stored %d listings, %d events; want %d", len(db.listings), len(db.outbox), domain.DefaultListingQuota)
 			}
 		})
 	}
@@ -222,12 +200,12 @@ func TestCreateListingQuotas(t *testing.T) {
 
 func TestQuotasArePerKindAndCountOnlyActive(t *testing.T) {
 	e := newEnv()
-	p := farmer() // both roles: both quotas apply, independently
+	p := member() // both boards' quotas apply, independently
 	var offers []domain.Listing
-	for range 5 {
+	for range domain.DefaultListingQuota {
 		offers = append(offers, e.create(t, p, domain.KindOffer))
 	}
-	for range 5 {
+	for range domain.DefaultListingQuota {
 		e.create(t, p, domain.KindBuyRequest)
 	}
 	for _, kind := range []commonv1.ListingKind{domain.KindOffer, domain.KindBuyRequest} {
@@ -235,41 +213,37 @@ func TestQuotasArePerKindAndCountOnlyActive(t *testing.T) {
 		wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_PLAN_LIMIT_REACHED)
 	}
 	// Another owner is not affected.
-	e.create(t, farmer(), domain.KindOffer)
+	e.create(t, member(), domain.KindOffer)
 
-	// Listings off the board free their slot: deleted, closed, sold out, blocked.
+	// Listings off the board free their slot: deleted, closed, blocked.
 	if err := e.svc.DeleteListing(ctx, p, offers[0].ID.String(), 0); err != nil {
 		t.Fatal(err)
 	}
 	e.setStatus(offers[1].ID, domain.StatusClosed)
-	e.setStatus(offers[2].ID, domain.StatusSoldOut)
-	e.setStatus(offers[3].ID, domain.StatusBlocked)
-	for range 4 {
+	e.setStatus(offers[2].ID, domain.StatusBlocked)
+	for range 3 {
 		e.create(t, p, domain.KindOffer)
 	}
 	_, err := e.svc.CreateListing(ctx, p, uuid.NewString(), domain.KindOffer, fields())
 	wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_PLAN_LIMIT_REACHED)
-
-	// Premium raises the limit for the same user.
-	e.create(t, premium(p), domain.KindOffer)
 }
 
-func TestQuotasAreConfigurable(t *testing.T) {
-	e := newEnv(service.WithQuotas(domain.Quotas{OfferDefault: 1, OfferPremium: 2, BuyRequestDefault: 1, BuyRequestPremium: 3}))
-	p := farmer()
+func TestListingQuotaIsConfigurable(t *testing.T) {
+	e := newEnv(service.WithListingQuota(1))
+	p := member()
 	e.create(t, p, domain.KindOffer)
 	_, err := e.svc.CreateListing(ctx, p, uuid.NewString(), domain.KindOffer, fields())
 	if ae := wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_PLAN_LIMIT_REACHED); ae.Metadata["limit"] != "1" {
 		t.Fatalf("metadata = %v", ae.Metadata)
 	}
-	e.create(t, premium(p), domain.KindOffer)
+	e.create(t, p, domain.KindBuyRequest) // the other board has its own quota
 }
 
 func TestCreateListingIsIdempotent(t *testing.T) {
 	e := newEnv()
-	p := farmer()
+	p := member()
 	reqID := uuid.NewString()
-	for range 4 {
+	for range domain.DefaultListingQuota - 1 {
 		e.create(t, p, domain.KindOffer)
 	}
 	first, err := e.svc.CreateListing(ctx, p, reqID, domain.KindOffer, fields())
@@ -281,11 +255,11 @@ func TestCreateListingIsIdempotent(t *testing.T) {
 	if err != nil || again.ID != first.ID || again.Version != first.Version {
 		t.Fatalf("retry = %+v, %v; want listing %s", again, err, first.ID)
 	}
-	if db := e.store.state(); len(db.listings) != 5 || len(db.outbox) != 5 {
+	if db := e.store.state(); len(db.listings) != domain.DefaultListingQuota || len(db.outbox) != domain.DefaultListingQuota {
 		t.Fatalf("stored %d listings, %d events after a retry", len(db.listings), len(db.outbox))
 	}
 	// The same request id of another user is another listing.
-	other, err := e.svc.CreateListing(ctx, farmer(), reqID, domain.KindOffer, fields())
+	other, err := e.svc.CreateListing(ctx, member(), reqID, domain.KindOffer, fields())
 	if err != nil || other.ID == first.ID {
 		t.Fatalf("other user's create = %+v, %v", other, err)
 	}
@@ -293,7 +267,7 @@ func TestCreateListingIsIdempotent(t *testing.T) {
 
 func TestCreateListingProducts(t *testing.T) {
 	e := newEnv()
-	p := farmer()
+	p := member()
 	f := fields()
 	f.Product = commonv1.ProductType_PRODUCT_TYPE_BEDA // retired in the test reference data
 	_, err := e.svc.CreateListing(ctx, p, uuid.NewString(), domain.KindOffer, f)
@@ -333,7 +307,7 @@ func TestCreateListingValidation(t *testing.T) {
 			e := newEnv()
 			f := fields()
 			tc.change(&f)
-			_, err := e.svc.CreateListing(ctx, farmer(), uuid.NewString(), domain.KindOffer, f)
+			_, err := e.svc.CreateListing(ctx, member(), uuid.NewString(), domain.KindOffer, f)
 			ae := wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_VALIDATION_FAILED)
 			if len(ae.Violations) == 0 || ae.Violations[0].GetField() != tc.field {
 				t.Fatalf("violations = %v, want field %s", ae.Violations, tc.field)
@@ -348,11 +322,11 @@ func TestCreateListingValidation(t *testing.T) {
 	f.Notes = "  " + strings.Repeat("я", 1000) + "\n"
 	f.Address.District = "  Urgut tumani "
 	f.Price = nil
-	l, err := e.svc.CreateListing(ctx, farmer(), uuid.NewString(), domain.KindOffer, f)
+	l, err := e.svc.CreateListing(ctx, member(), uuid.NewString(), domain.KindOffer, f)
 	if err != nil || len([]rune(l.Notes)) != 1000 || l.Address.District != "Urgut tumani" || l.Price != nil {
 		t.Fatalf("listing = %+v, %v", l, err)
 	}
-	if _, err := e.svc.CreateListing(ctx, farmer(), "not-a-uuid", domain.KindOffer, fields()); err == nil {
+	if _, err := e.svc.CreateListing(ctx, member(), "not-a-uuid", domain.KindOffer, fields()); err == nil {
 		t.Fatal("bad request_id: want an error")
 	}
 }
@@ -360,7 +334,7 @@ func TestCreateListingValidation(t *testing.T) {
 func TestCreateListingRateLimit(t *testing.T) {
 	e := newEnv()
 	e.limiter.allowed, e.limiter.retryAfter = false, 90*time.Second
-	p := farmer()
+	p := member()
 	_, err := e.svc.CreateListing(ctx, p, uuid.NewString(), domain.KindOffer, fields())
 	ae := wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_RATE_LIMITED)
 	if ae.Metadata["retry_after_seconds"] != "90" || e.limiter.keys[0] != "create-listing:"+p.UserID.String() {
@@ -381,6 +355,6 @@ func TestCreateListingRateLimit(t *testing.T) {
 func TestCreateListingRollsBackOnFailure(t *testing.T) {
 	e := newEnv()
 	e.store.update(func(d *fakeDB) { d.failWith = errors.New("connection reset") })
-	_, err := e.svc.CreateListing(ctx, farmer(), uuid.NewString(), domain.KindOffer, fields())
+	_, err := e.svc.CreateListing(ctx, member(), uuid.NewString(), domain.KindOffer, fields())
 	wantReason(t, apperr.From(err), commonv1.ErrorReason_ERROR_REASON_INTERNAL)
 }

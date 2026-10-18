@@ -198,18 +198,17 @@ func listingsProto(ls []domain.Listing) []*catalogv1.Listing {
 
 func listingProto(l domain.Listing) *catalogv1.Listing {
 	return &catalogv1.Listing{
-		Id:                l.ID.String(),
-		Kind:              l.Kind,
-		OwnerId:           l.OwnerID.String(),
-		Product:           l.Product,
-		Quantity:          l.Quantity.Proto(),
-		RemainingQuantity: l.Remaining().Proto(), // quantity minus the escrow commitments from the transaction stream
-		Price:             l.Price.Proto(),
-		Phone:             l.Phone,
-		Address:           l.Address.Proto(),
-		Notes:             l.Notes,
-		Media:             domain.MediaRefs(l.MediaIDs), // TODO(media): ids only
-		Status:            l.Status,
+		Id:       l.ID.String(),
+		Kind:     l.Kind,
+		OwnerId:  l.OwnerID.String(),
+		Product:  l.Product,
+		Quantity: l.Quantity.Proto(),
+		Price:    l.Price.Proto(),
+		Phone:    l.Phone,
+		Address:  l.Address.Proto(),
+		Notes:    l.Notes,
+		Media:    domain.MediaRefs(l.MediaIDs), // TODO(media): ids only
+		Status:   l.Status,
 		// TODO(edge): only user_id. The owner card (display name, avatar,
 		// rating, Premium and verified-farmer badges) is profile-social's
 		// data; by decision the API gateway / client composes it, and

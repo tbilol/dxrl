@@ -2,7 +2,7 @@
 // the resellers' buy-request board, listing search and the product reference
 // data.
 //
-//	catalog [serve]                  run the gRPC and HTTP servers, the outbox relay, the transaction-stream consumer and the view counter (default)
+//	catalog [serve]                  run the gRPC and HTTP servers, the outbox relay and the view counter (default)
 //	catalog migrate up|down|status   manage the database schema (and the product seed)
 //	catalog healthcheck              GET /readyz; exit 0 when ready (container HEALTHCHECK)
 //
@@ -26,7 +26,7 @@ import (
 )
 
 const usage = `usage:
-  catalog [serve]                  run the gRPC and HTTP servers, the relay, the consumer and the view counter (default)
+  catalog [serve]                  run the gRPC and HTTP servers, the relay and the view counter (default)
   catalog migrate up|down|status   apply all, roll back one, or list migrations
   catalog healthcheck              exit 0 when GET /readyz answers 200
 `

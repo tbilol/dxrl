@@ -26,7 +26,7 @@ func (e env) lastQuery(t *testing.T) domain.ListingQuery {
 
 func TestListListingsStatusesAndVisibility(t *testing.T) {
 	e := newEnv()
-	owner := farmer()
+	owner := member()
 	active := e.create(t, owner, domain.KindOffer)
 	closed := e.create(t, owner, domain.KindOffer)
 	e.setStatus(closed.ID, domain.StatusClosed)
@@ -54,10 +54,10 @@ func TestListListingsStatusesAndVisibility(t *testing.T) {
 		p auth.Principal
 		f domain.ListingFilter
 	}{
-		"other user":             {reseller(), domain.ListingFilter{OwnerID: owner.UserID.String(), Statuses: nonActive}},
+		"other user":             {member(), domain.ListingFilter{OwnerID: owner.UserID.String(), Statuses: nonActive}},
 		"anonymous":              {auth.Principal{}, domain.ListingFilter{OwnerID: owner.UserID.String(), Statuses: nonActive}},
 		"owner without owner_id": {owner, domain.ListingFilter{Statuses: nonActive}},
-		"order-escrow":           {internalCaller("order-escrow"), domain.ListingFilter{Statuses: nonActive}},
+		"another service":        {internalCaller("notification"), domain.ListingFilter{Statuses: nonActive}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := e.svc.ListListings(ctx, tc.p, tc.f, domain.PageRequest{})
@@ -74,15 +74,15 @@ func TestListListingsPages(t *testing.T) {
 	e := newEnv()
 	var created []domain.Listing
 	for range 5 {
-		created = append(created, e.create(t, farmer(), domain.KindOffer))
+		created = append(created, e.create(t, member(), domain.KindOffer))
 	}
-	e.create(t, farmer(), domain.KindBuyRequest) // another board
+	e.create(t, member(), domain.KindBuyRequest) // another board
 	f := domain.ListingFilter{Kind: domain.KindOffer}
 
 	var got []uuid.UUID
 	token := ""
 	for i := 0; ; i++ {
-		page, err := e.svc.ListListings(ctx, reseller(), f, domain.PageRequest{Size: 2, Token: token})
+		page, err := e.svc.ListListings(ctx, member(), f, domain.PageRequest{Size: 2, Token: token})
 		if err != nil {
 			t.Fatalf("page %d: %v", i, err)
 		}
@@ -103,22 +103,22 @@ func TestListListingsPages(t *testing.T) {
 	}
 
 	// A token is valid only for the query that produced it.
-	first, err := e.svc.ListListings(ctx, reseller(), f, domain.PageRequest{Size: 2})
+	first, err := e.svc.ListListings(ctx, member(), f, domain.PageRequest{Size: 2})
 	if err != nil || first.NextPageToken == "" {
 		t.Fatalf("first page = %+v, %v", first, err)
 	}
 	for name, call := range map[string]func() error{
 		"other filter": func() error {
-			_, err := e.svc.ListListings(ctx, reseller(), domain.ListingFilter{Kind: domain.KindBuyRequest},
+			_, err := e.svc.ListListings(ctx, member(), domain.ListingFilter{Kind: domain.KindBuyRequest},
 				domain.PageRequest{Token: first.NextPageToken})
 			return err
 		},
 		"search with a list token": func() error {
-			_, err := e.svc.SearchListings(ctx, reseller(), "", f, 0, 0, domain.PageRequest{Token: first.NextPageToken})
+			_, err := e.svc.SearchListings(ctx, member(), "", f, 0, 0, domain.PageRequest{Token: first.NextPageToken})
 			return err
 		},
 		"garbage": func() error {
-			_, err := e.svc.ListListings(ctx, reseller(), f, domain.PageRequest{Token: "not-a-token"})
+			_, err := e.svc.ListListings(ctx, member(), f, domain.PageRequest{Token: "not-a-token"})
 			return err
 		},
 	} {
@@ -130,7 +130,7 @@ func TestListListingsPages(t *testing.T) {
 		})
 	}
 	// The page size may change between pages; 0 means 20 and 100 is the cap.
-	if _, err := e.svc.ListListings(ctx, reseller(), f, domain.PageRequest{Size: 500, Token: first.NextPageToken}); err != nil {
+	if _, err := e.svc.ListListings(ctx, member(), f, domain.PageRequest{Size: 500, Token: first.NextPageToken}); err != nil {
 		t.Fatal(err)
 	}
 	if q := e.lastQuery(t); q.Limit != 101 || q.After == nil || q.After.ID != created[3].ID {
@@ -140,7 +140,7 @@ func TestListListingsPages(t *testing.T) {
 
 func TestSearchListingsCriteria(t *testing.T) {
 	e := newEnv()
-	owner := farmer()
+	owner := member()
 	f := domain.ListingFilter{
 		Kind:        domain.KindOffer,
 		Products:    []commonv1.ProductType{commonv1.ProductType_PRODUCT_TYPE_SABZI, commonv1.ProductType_PRODUCT_TYPE_BUGDOY},
@@ -157,7 +157,7 @@ func TestSearchListingsCriteria(t *testing.T) {
 	}
 	q := e.lastQuery(t)
 	c := q.Criteria
-	if c.Kind != domain.KindOffer || c.OwnerID != owner.UserID || c.District != "Urgut" || c.MinRemainingGrams != 1_000_000 ||
+	if c.Kind != domain.KindOffer || c.OwnerID != owner.UserID || c.District != "Urgut" || c.MinQuantityGrams != 1_000_000 ||
 		!slices.Equal(c.Products, []commonv1.ProductType{commonv1.ProductType_PRODUCT_TYPE_BUGDOY, commonv1.ProductType_PRODUCT_TYPE_SABZI}) ||
 		!slices.Equal(c.Regions, []commonv1.Region{commonv1.Region_REGION_ANDIJON, commonv1.Region_REGION_XORAZM}) ||
 		*c.MinPricePerTonne != 300_000_000 || *c.MaxPricePerTonne != 500_000_000 ||
@@ -226,14 +226,14 @@ func TestSearchListingsSortResolution(t *testing.T) {
 		{"!!! ...", unspecified, 0, domain.SortCreatedAt, true}, // no words: filters only
 	}
 	for _, tc := range cases {
-		if _, err := e.svc.SearchListings(ctx, reseller(), tc.text, domain.ListingFilter{}, tc.field, tc.dir, domain.PageRequest{}); err != nil {
+		if _, err := e.svc.SearchListings(ctx, member(), tc.text, domain.ListingFilter{}, tc.field, tc.dir, domain.PageRequest{}); err != nil {
 			t.Fatalf("%+v: %v", tc, err)
 		}
 		if q := e.lastQuery(t); q.Sort != tc.sort || q.Desc != tc.desc {
 			t.Fatalf("%+v: sort = %s desc=%t", tc, q.Sort, q.Desc)
 		}
 	}
-	_, err := e.svc.SearchListings(ctx, reseller(), "kartoshka", domain.ListingFilter{}, relevance, asc, domain.PageRequest{})
+	_, err := e.svc.SearchListings(ctx, member(), "kartoshka", domain.ListingFilter{}, relevance, asc, domain.PageRequest{})
 	if ae := wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_VALIDATION_FAILED); ae.Violations[0].GetField() != "sort_direction" {
 		t.Fatalf("violations = %v", ae.Violations)
 	}
@@ -241,14 +241,15 @@ func TestSearchListingsSortResolution(t *testing.T) {
 
 // TestSearchPageTokens: the next-page token carries the last hit's sort key
 // (price per tonne, with the negotiable key for listings without a price,
-// remaining grams, or text rank) and is bound to the query.
+// quantity in grams, or text rank) and is bound to the query.
 func TestSearchPageTokens(t *testing.T) {
 	at := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	hit := func(price *domain.Price, grams int64, rank float32, age time.Duration) domain.Hit {
 		f := fields()
 		f.Price = price
+		f.Quantity.Grams = grams
 		return domain.Hit{Listing: domain.Listing{ID: uuid.Must(uuid.NewV7()), Kind: domain.KindOffer, ListingFields: f,
-			RemainingGrams: grams, Status: domain.StatusActive, CreatedAt: at.Add(-age)}, Rank: rank}
+			Status: domain.StatusActive, CreatedAt: at.Add(-age)}, Rank: rank}
 	}
 	perKg := &domain.Price{AmountMinor: 450_000, Currency: "UZS", Unit: domain.UnitKilogram}
 	cases := map[string]struct {
@@ -275,11 +276,11 @@ func TestSearchPageTokens(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv()
 			e.store.update(func(d *fakeDB) { d.hits = tc.hits })
-			page, err := e.svc.SearchListings(ctx, reseller(), tc.text, domain.ListingFilter{}, tc.field, tc.dir, domain.PageRequest{Size: 2})
+			page, err := e.svc.SearchListings(ctx, member(), tc.text, domain.ListingFilter{}, tc.field, tc.dir, domain.PageRequest{Size: 2})
 			if err != nil || len(page.Listings) != 2 || page.NextPageToken == "" {
 				t.Fatalf("page = %+v, %v", page, err)
 			}
-			if _, err := e.svc.SearchListings(ctx, reseller(), tc.text, domain.ListingFilter{}, tc.field, tc.dir,
+			if _, err := e.svc.SearchListings(ctx, member(), tc.text, domain.ListingFilter{}, tc.field, tc.dir,
 				domain.PageRequest{Size: 2, Token: page.NextPageToken}); err != nil {
 				t.Fatal(err)
 			}
@@ -289,10 +290,10 @@ func TestSearchPageTokens(t *testing.T) {
 				t.Fatalf("cursor = %+v, want key %d rank %v of %s", after, tc.wantKey, tc.rank, last.ID)
 			}
 			// Another text, direction or filter: the token does not fit.
-			_, err = e.svc.SearchListings(ctx, reseller(), tc.text+" x", domain.ListingFilter{}, tc.field, tc.dir,
+			_, err = e.svc.SearchListings(ctx, member(), tc.text+" x", domain.ListingFilter{}, tc.field, tc.dir,
 				domain.PageRequest{Token: page.NextPageToken})
 			wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_VALIDATION_FAILED)
-			_, err = e.svc.SearchListings(ctx, reseller(), tc.text, domain.ListingFilter{Kind: domain.KindOffer}, tc.field, tc.dir,
+			_, err = e.svc.SearchListings(ctx, member(), tc.text, domain.ListingFilter{Kind: domain.KindOffer}, tc.field, tc.dir,
 				domain.PageRequest{Token: page.NextPageToken})
 			wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_VALIDATION_FAILED)
 		})
@@ -306,7 +307,7 @@ func TestSearchHidesNonActiveFromOthers(t *testing.T) {
 	hidden := domain.Hit{Listing: domain.Listing{ID: uuid.New(), OwnerID: uuid.New(), Status: domain.StatusBlocked}}
 	visible := domain.Hit{Listing: domain.Listing{ID: uuid.New(), OwnerID: uuid.New(), Status: domain.StatusActive}}
 	e.store.update(func(d *fakeDB) { d.hits = []domain.Hit{hidden, visible} })
-	page, err := e.svc.SearchListings(ctx, reseller(), "", domain.ListingFilter{}, 0, 0, domain.PageRequest{})
+	page, err := e.svc.SearchListings(ctx, member(), "", domain.ListingFilter{}, 0, 0, domain.PageRequest{})
 	if err != nil || len(page.Listings) != 1 || page.Listings[0].ID != visible.ID {
 		t.Fatalf("page = %+v, %v", page, err)
 	}
@@ -331,7 +332,7 @@ func TestTerms(t *testing.T) {
 
 func TestSearchQueryTermsAreDistinctAndBounded(t *testing.T) {
 	e := newEnv()
-	if _, err := e.svc.SearchListings(ctx, reseller(), "a b a c d e f g h i j k l", domain.ListingFilter{}, 0, 0,
+	if _, err := e.svc.SearchListings(ctx, member(), "a b a c d e f g h i j k l", domain.ListingFilter{}, 0, 0,
 		domain.PageRequest{}); err != nil {
 		t.Fatal(err)
 	}

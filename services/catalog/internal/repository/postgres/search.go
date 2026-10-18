@@ -88,8 +88,8 @@ func findListingsSQL(q domain.ListingQuery) (string, []any, error) {
 	if c.District != "" {
 		where = append(where, "lower(l.district) = lower("+args.add(c.District)+")")
 	}
-	if c.MinRemainingGrams > 0 {
-		where = append(where, "l.remaining_grams >= "+args.add(c.MinRemainingGrams))
+	if c.MinQuantityGrams > 0 {
+		where = append(where, "l.quantity_grams >= "+args.add(c.MinQuantityGrams))
 	}
 	if c.MinPricePerTonne != nil {
 		where = append(where, "l.price_per_tonne_minor >= "+args.add(*c.MinPricePerTonne))
@@ -121,7 +121,7 @@ func findListingsSQL(q domain.ListingQuery) (string, []any, error) {
 		expr := fmt.Sprintf("COALESCE(l.price_per_tonne_minor, %d)", domain.NegotiableSortKey(q.Desc))
 		keys = []sortKey{{expr: expr, desc: q.Desc, value: cur.Key}, created, id}
 	case domain.SortQuantity:
-		keys = []sortKey{{expr: "l.remaining_grams", desc: q.Desc, value: cur.Key}, created, id}
+		keys = []sortKey{{expr: "l.quantity_grams", desc: q.Desc, value: cur.Key}, created, id}
 	case domain.SortRelevance:
 		keys = []sortKey{{expr: rank, desc: true, value: cur.Rank, cast: "::real"}, created, id}
 	default:

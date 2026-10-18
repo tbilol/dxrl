@@ -2,17 +2,13 @@ package events
 
 import (
 	"bytes"
-	"errors"
-	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"buf.build/go/protovalidate"
 	"github.com/google/uuid"
 	commonv1 "github.com/tbilol/dxrl/gen/go/common/v1"
 	eventsv1 "github.com/tbilol/dxrl/gen/go/events/v1"
-	"github.com/twmb/franz-go/pkg/kgo"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/tbilol/dxrl/services/catalog/internal/domain"
@@ -35,7 +31,6 @@ func sampleListing() domain.Listing {
 			Notes:    "Sifatli kartoshka, qoplarda",
 			MediaIDs: []uuid.UUID{uuid.New(), uuid.New()},
 		},
-		RemainingGrams:  20_000_000,
 		Status:          domain.StatusActive,
 		Version:         1,
 		CreateRequestID: uuid.New(),
@@ -135,62 +130,10 @@ func TestNewListingEventNegotiableAndErrors(t *testing.T) {
 // The topic names are the contract's (metadata.proto, deploy/kafka/create-topics.sh).
 func TestTopics(t *testing.T) {
 	for got, want := range map[string]string{
-		TopicListing:     "agrogram.catalog.listing.v1",
-		TopicTransaction: "agrogram.orderescrow.transaction.v1",
-		TopicDeadLetter:  "agrogram.catalog.deadletter.v1",
+		TopicListing: "agrogram.catalog.listing.v1",
 	} {
 		if got != want {
 			t.Errorf("topic %q, want %q", got, want)
 		}
-	}
-}
-
-func TestNewDeadLetter(t *testing.T) {
-	r := &kgo.Record{
-		Topic: TopicTransaction, Partition: 2, Offset: 41, Key: []byte("tx-1"), Value: []byte{0xff},
-		Headers: []kgo.RecordHeader{{Key: HeaderEventID, Value: []byte("e-1")}},
-	}
-	first := testNow.Add(-time.Minute)
-	long := strings.Repeat("é", maxDeadLetterMessage) // 2 bytes each: must be cut on a rune boundary
-
-	for _, tc := range []struct {
-		name     string
-		cause    error
-		reason   commonv1.ErrorReason
-		failure  string
-		attempts int
-	}{
-		{"poison", Permanent(errors.New("decode TransactionEvent: bad wire type")),
-			commonv1.ErrorReason_ERROR_REASON_VALIDATION_FAILED, "poison", 1},
-		{"inconsistent", Permanent(domain.ErrInconsistentEvent), commonv1.ErrorReason_ERROR_REASON_VALIDATION_FAILED, "poison", 1},
-		{"exhausted", errors.New(long), commonv1.ErrorReason_ERROR_REASON_INTERNAL, "retries_exhausted", 5},
-	} {
-		out, err := NewDeadLetter(r, "catalog", tc.cause, tc.attempts, first, testNow)
-		if err != nil {
-			t.Fatalf("%s: %v", tc.name, err)
-		}
-		if out.Topic != TopicDeadLetter || string(out.Key) != "tx-1" ||
-			len(out.Headers) != 1 || string(out.Headers[0].Value) != ContentType {
-			t.Fatalf("%s: record = %+v", tc.name, out)
-		}
-		var dl eventsv1.DeadLetter
-		if err := proto.Unmarshal(out.Value, &dl); err != nil {
-			t.Fatal(err)
-		}
-		if dl.GetSourceTopic() != TopicTransaction || dl.GetSourcePartition() != 2 || dl.GetSourceOffset() != 41 ||
-			string(dl.GetValue()) != "\xff" || string(dl.GetHeaders()[HeaderEventID]) != "e-1" ||
-			dl.GetConsumerGroup() != "catalog" || dl.GetAttempts() != int32(tc.attempts) ||
-			!dl.GetFirstFailedAt().AsTime().Equal(first) || !dl.GetDeadLetteredAt().AsTime().Equal(testNow) {
-			t.Fatalf("%s: dead letter = %v", tc.name, &dl)
-		}
-		e := dl.GetError()
-		if e.GetReason() != tc.reason || e.GetDomain() != ProducerName || e.GetMetadata()["failure"] != tc.failure ||
-			len(e.GetMessage()) > maxDeadLetterMessage || !utf8.ValidString(e.GetMessage()) || e.GetMessage() == "" {
-			t.Fatalf("%s: error = %v", tc.name, e)
-		}
-	}
-	// An empty group cannot make a valid DeadLetter.
-	if _, err := NewDeadLetter(r, "", Permanent(errors.New("x")), 1, first, testNow); err == nil {
-		t.Fatal("empty consumer group: want an error")
 	}
 }

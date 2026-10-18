@@ -22,14 +22,13 @@ import (
 // caller, and publishes ListingCreated through the outbox in the same
 // transaction.
 //
-// Rules, in order: a signed-in caller; offers need ROLE_FARMER
-// (FARMER_VERIFICATION_REQUIRED), buy-requests ROLE_RESELLER
-// (PERMISSION_DENIED); the fields are valid; the per-user creation rate
-// limit (RATE_LIMITED, fails open without Redis); then, under a per-owner
-// advisory lock: a retry with the same request id returns the listing it
-// created, the product must be in the reference data and not retired, and
-// the owner's ACTIVE listings of kind must be below the plan's quota
-// (PLAN_LIMIT_REACHED). Only ACTIVE listings count: CLOSED, SOLD_OUT,
+// Rules, in order: a signed-in caller (any user may post on either board;
+// kind names the board, not a role); the fields are valid; the per-user
+// creation rate limit (RATE_LIMITED, fails open without Redis); then, under a
+// per-owner advisory lock: a retry with the same request id returns the
+// listing it created, the product must be in the reference data and not
+// retired, and the owner's ACTIVE listings of kind must be below the flat
+// per-board quota (PLAN_LIMIT_REACHED). Only ACTIVE listings count: CLOSED,
 // BLOCKED and DELETED ones are off the board, so they do not hold a slot.
 func (s *Service) CreateListing(ctx context.Context, p auth.Principal, requestID string, kind commonv1.ListingKind,
 	f domain.ListingFields,
@@ -42,19 +41,16 @@ func (s *Service) CreateListing(ctx context.Context, p auth.Principal, requestID
 	if err != nil {
 		return domain.Listing{}, err
 	}
-	if err := checkRole(p, kind); err != nil {
+	if err := checkKind(kind); err != nil {
 		return domain.Listing{}, err
 	}
 	if f, err = normalize(f, domain.AllFields); err != nil {
 		return domain.Listing{}, err
 	}
-	if err := checkMedia(p, f.MediaIDs); err != nil {
-		return domain.Listing{}, err
-	}
 	if err := s.checkRateLimit(ctx, owner); err != nil {
 		return domain.Listing{}, err
 	}
-	limit, plan := s.quotas.Limit(kind, p.Premium)
+	limit := s.quota
 	tr := requestTrigger(p)
 	var (
 		l       domain.Listing
@@ -82,8 +78,8 @@ func (s *Service) CreateListing(ctx context.Context, p auth.Principal, requestID
 		}
 		if n >= limit {
 			return apperr.New(commonv1.ErrorReason_ERROR_REASON_PLAN_LIMIT_REACHED,
-				fmt.Sprintf("the %s plan allows %d active %s listings", plan, limit, kindName(kind)),
-				"plan", plan, "listing_kind", kindName(kind), "limit", strconv.Itoa(limit))
+				fmt.Sprintf("at most %d active %s listings per user", limit, kindName(kind)),
+				"listing_kind", kindName(kind), "limit", strconv.Itoa(limit))
 		}
 		id, err := newID()
 		if err != nil {
@@ -95,7 +91,6 @@ func (s *Service) CreateListing(ctx context.Context, p auth.Principal, requestID
 			Kind:            kind,
 			OwnerID:         owner,
 			ListingFields:   f,
-			RemainingGrams:  f.Quantity.Grams, // a new listing has no escrow transactions: all of it remains
 			Status:          domain.StatusActive,
 			Version:         1,
 			CreateRequestID: reqID,
@@ -126,33 +121,24 @@ func (s *Service) CreateListing(ctx context.Context, p auth.Principal, requestID
 	}
 	if created {
 		s.log.InfoContext(ctx, "listing created", "listing_id", l.ID, "owner_id", owner, "kind", kindName(kind),
-			"product", l.Product.String(), "plan", plan, "request_id", p.RequestID)
+			"product", l.Product.String(), "request_id", p.RequestID)
 	}
 	return l, nil
 }
 
 // GetListing returns a listing. ACTIVE listings are visible to everyone
-// (anonymous callers too); other statuses (CLOSED, SOLD_OUT, BLOCKED,
-// DELETED) only to the owner, the parties of escrow transactions on the
-// listing (catalog.proto; catalog knows them from order-escrow's transaction
-// stream), staff (ROLE_ADMIN) and order-escrow (x-agrogram-caller), which
-// snapshots listings into transactions. Everyone else gets NOT_FOUND. An
-// ACTIVE listing opened by someone other than its owner, staff or a service
-// counts as a view, in the background.
+// (anonymous callers too); other statuses (CLOSED, BLOCKED, DELETED) only to
+// the owner and staff (ROLE_ADMIN). Everyone else gets NOT_FOUND. An ACTIVE
+// listing opened by someone other than its owner, staff or a service counts
+// as a view, in the background.
 func (s *Service) GetListing(ctx context.Context, p auth.Principal, listingID string) (domain.Listing, error) {
 	id, err := parseID("listing_id", listingID)
 	if err != nil {
 		return domain.Listing{}, err
 	}
-	var (
-		l       domain.Listing
-		visible bool
-	)
+	var l domain.Listing
 	err = s.store.Run(ctx, func(q Queries) error {
-		if l, err = q.GetListing(ctx, id); err != nil {
-			return err
-		}
-		visible, err = canRead(ctx, q, p, l)
+		l, err = q.GetListing(ctx, id)
 		return err
 	})
 	switch {
@@ -161,36 +147,19 @@ func (s *Service) GetListing(ctx context.Context, p auth.Principal, listingID st
 	case err != nil:
 		return domain.Listing{}, fmt.Errorf("get listing: %w", err)
 	}
-	if !visible {
+	if !canSee(p, l) {
 		return domain.Listing{}, listingNotFound(id)
 	}
 	s.countView(p, l)
 	return l, nil
 }
 
-// canSee reports whether p may read l by the rules that need no lookup: l is
-// ACTIVE, or p is its owner, staff or order-escrow. canRead adds the parties
-// of escrow transactions on l.
+// canSee reports whether p may read l: l is ACTIVE, or p is its owner or
+// staff.
 func canSee(p auth.Principal, l domain.Listing) bool {
 	return l.Status == domain.StatusActive ||
 		(p.Authenticated() && p.UserID == l.OwnerID) ||
-		p.Staff() ||
-		p.Caller == CallerOrderEscrow
-}
-
-// canRead reports whether p may read l: canSee, or p is signed in and the
-// farmer or the reseller of an escrow transaction on l, whatever its status
-// (catalog.proto: "Non-ACTIVE listings are visible to their owner, to the
-// parties of transactions on them, and to staff"). The party lookup runs only
-// when canSee says no.
-func canRead(ctx context.Context, q Queries, p auth.Principal, l domain.Listing) (bool, error) {
-	if canSee(p, l) {
-		return true, nil
-	}
-	if !p.Authenticated() {
-		return false, nil
-	}
-	return q.IsTransactionParty(ctx, l.ID, p.UserID)
+		p.Staff()
 }
 
 // countView records a view of l unless the owner, staff or another service
@@ -205,19 +174,11 @@ func (s *Service) countView(p auth.Principal, l domain.Listing) {
 
 // UpdateListing changes the update_mask fields of the caller's own listing.
 // Only ACTIVE listings can be edited (LISTING_NOT_ACTIVE otherwise: a closed,
-// sold-out, blocked or deleted listing is off the board and has no way back
-// yet); kind never changes. expectedVersion 0 skips the optimistic
-// concurrency check; a stale one is ABORTED / CONFLICT with the current
-// version. Values equal to the current ones change nothing (no version bump).
-// A new product must not be retired; an unchanged retired product stays.
-//
-// The quantity cannot drop below what escrow transactions have committed of
-// the listing (INSUFFICIENT_QUANTITY, with requested_grams and
-// committed_grams). The remaining quantity becomes the quantity minus that,
-// and a listing with nothing left becomes SOLD_OUT, the rule the
-// transaction-stream consumer applies (ApplyTransactionEvent). The committed
-// quantity is read under the listing's row lock, which the consumer takes
-// too, so the two cannot interleave.
+// blocked or deleted listing is off the board and has no way back yet); kind
+// never changes. expectedVersion 0 skips the optimistic concurrency check; a
+// stale one is ABORTED / CONFLICT with the current version. Values equal to
+// the current ones change nothing (no version bump). A new product must not
+// be retired; an unchanged retired product stays.
 func (s *Service) UpdateListing(ctx context.Context, p auth.Principal, listingID string, f domain.ListingFields,
 	mask []string, expectedVersion int64,
 ) (domain.Listing, error) {
@@ -242,11 +203,6 @@ func (s *Service) UpdateListing(ctx context.Context, p auth.Principal, listingID
 	}
 	if f, err = normalize(f, mask); err != nil {
 		return domain.Listing{}, err
-	}
-	if slices.Contains(mask, domain.FieldMedia) {
-		if err := checkMedia(p, f.MediaIDs); err != nil {
-			return domain.Listing{}, err
-		}
 	}
 	var (
 		l       domain.Listing
@@ -273,14 +229,6 @@ func (s *Service) UpdateListing(ctx context.Context, p auth.Principal, listingID
 		if err != nil {
 			return err
 		}
-		committed, err := q.CommittedGrams(ctx, id)
-		if err != nil {
-			return err
-		}
-		if next.Quantity.Grams < committed {
-			return insufficient(cur, next.Quantity.Grams, committed)
-		}
-		next = withCommitted(next, committed)
 		next.Version++
 		next.UpdatedAt = s.clock()
 		doc := searchDocument(pt, next.ListingFields)
@@ -304,14 +252,13 @@ func (s *Service) UpdateListing(ctx context.Context, p auth.Principal, listingID
 }
 
 // DeleteListing soft-deletes the caller's own listing: status DELETED,
-// version + 1. Transactions already started on it continue (the row stays).
-// Deleting a deleted listing is a no-op (so a retry succeeds even though the
+// version + 1. Deleting a deleted listing is a no-op (so a retry succeeds even though the
 // first call bumped the version); otherwise expectedVersion 0 skips the
 // check and a stale one is ABORTED / CONFLICT. Listings in any other status
 // can be deleted.
 //
 // TODO(proto): catalog.proto has no CloseListing RPC (status CLOSED, "closed
-// by the owner": off the board, transactions continue), and update_mask
+// by the owner": off the board), and update_mask
 // cannot name `status`. Closing belongs next to this method once the
 // contract has it.
 func (s *Service) DeleteListing(ctx context.Context, p auth.Principal, listingID string, expectedVersion int64) error {
@@ -344,8 +291,8 @@ func (s *Service) DeleteListing(ctx context.Context, p auth.Principal, listingID
 			return err
 		}
 		// TODO(events): publish ListingDeleted here once listing.proto
-		// defines it (order-escrow and profile-social rely on the stream to
-		// learn that a listing left the board); nothing is published today.
+		// defines it (profile-social relies on the stream to learn that a
+		// listing left the board); nothing is published today.
 		deleted = true
 		return nil
 	})
@@ -359,9 +306,8 @@ func (s *Service) DeleteListing(ctx context.Context, p auth.Principal, listingID
 }
 
 // lockOwned locks listing id for a change by its owner. A listing of
-// someone else is PERMISSION_DENIED when the caller may read it (canRead,
-// transaction parties included) and NOT_FOUND otherwise, so hidden listings
-// do not leak.
+// someone else is PERMISSION_DENIED when the caller may read it (canSee) and
+// NOT_FOUND otherwise, so hidden listings do not leak.
 func lockOwned(ctx context.Context, q Queries, p auth.Principal, caller, id uuid.UUID, action string) (domain.Listing, error) {
 	cur, err := q.LockListing(ctx, id)
 	if errors.Is(err, domain.ErrNotFound) {
@@ -371,11 +317,7 @@ func lockOwned(ctx context.Context, q Queries, p auth.Principal, caller, id uuid
 		return cur, err
 	}
 	if cur.OwnerID != caller {
-		visible, err := canRead(ctx, q, p, cur)
-		if err != nil {
-			return cur, err
-		}
-		if visible {
+		if canSee(p, cur) {
 			return cur, apperr.New(commonv1.ErrorReason_ERROR_REASON_PERMISSION_DENIED,
 				"only the owner may "+action+" a listing", "listing_id", id.String())
 		}
@@ -389,59 +331,24 @@ func notActive(l domain.Listing) error {
 		"only ACTIVE listings can be edited", "listing_id", l.ID.String(), "status", statusName(l.Status))
 }
 
-// insufficient is UpdateListing's INSUFFICIENT_QUANTITY: a quantity below
-// what escrow transactions have committed of l (metadata like order-escrow's
-// error of the same reason).
-func insufficient(l domain.Listing, requested, committed int64) error {
-	return apperr.New(commonv1.ErrorReason_ERROR_REASON_INSUFFICIENT_QUANTITY,
-		"the quantity cannot be less than what escrow transactions have already committed",
-		"listing_id", l.ID.String(), "requested_grams", strconv.FormatInt(requested, 10),
-		"committed_grams", strconv.FormatInt(committed, 10))
-}
-
 func conflict(l domain.Listing) error {
 	return apperr.New(commonv1.ErrorReason_ERROR_REASON_CONFLICT,
 		"the listing changed since it was read; reload it and retry",
 		"current_version", strconv.FormatInt(l.Version, 10))
 }
 
-// checkRole enforces who may post on which board (market.proto, auth.proto):
-// offers need ROLE_FARMER (FARMER_VERIFICATION_REQUIRED), buy-requests
-// ROLE_RESELLER, which every active account holds (PERMISSION_DENIED, the
-// closest reason error.proto has). Roles are the token-time snapshot from
-// x-agrogram-roles.
-func checkRole(p auth.Principal, kind commonv1.ListingKind) error {
-	switch kind {
-	case domain.KindOffer:
-		if !p.HasRole(domain.RoleFarmer) {
-			return apperr.New(commonv1.ErrorReason_ERROR_REASON_FARMER_VERIFICATION_REQUIRED,
-				"posting sell offers requires an e-ijara-verified farmer (ROLE_FARMER)",
-				"listing_kind", kindName(kind), "required_role", "FARMER")
-		}
-	case domain.KindBuyRequest:
-		if !p.HasRole(domain.RoleReseller) {
-			return apperr.New(commonv1.ErrorReason_ERROR_REASON_PERMISSION_DENIED,
-				"posting buy-requests requires ROLE_RESELLER",
-				"listing_kind", kindName(kind), "required_role", "RESELLER")
-		}
-	default:
-		return invalid("listing.kind", "kind is required", "create_listing.kind_required")
-	}
-	return nil
-}
-
-// checkMedia applies the media rules the contract states.
+// checkKind requires a board: any signed-in user may post on either one.
 //
-// STUB: the Premium rule for listing video (catalog.proto: "a video needs
-// Premium (PREMIUM_REQUIRED)") is not enforced. A request carries only media
-// ids (MediaRef.type is output only, so a client-declared type is never
-// trusted), and nothing can tell an image id from a video id yet.
-// TODO(media): look every id up in media-pipeline (exists, uploaded by the
-// caller, purpose MEDIA_PURPOSE_LISTING_IMAGE / _VIDEO, not FAILED) and
-// reject a video without p.Premium with PREMIUM_REQUIRED, at most one video
-// per listing.
-func checkMedia(_ auth.Principal, _ []uuid.UUID) error {
-	return nil
+// TODO(media): media ids are stored unchecked. Look every id up in
+// media-pipeline (exists, uploaded by the caller, purpose
+// MEDIA_PURPOSE_LISTING_IMAGE / _VIDEO, not FAILED), at most one video per
+// listing. Video is free for everyone: never gate it on a plan.
+func checkKind(kind commonv1.ListingKind) error {
+	switch kind {
+	case domain.KindOffer, domain.KindBuyRequest:
+		return nil
+	}
+	return invalid("listing.kind", "kind is required", "create_listing.kind_required")
 }
 
 // productType loads the reference data of t. A product unknown to the

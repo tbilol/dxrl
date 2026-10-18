@@ -45,7 +45,7 @@ func (s *Service) ListListings(ctx context.Context, p auth.Principal, f domain.L
 // RELEVANCE by default when there is text, CREATED_AT otherwise; RELEVANCE
 // without text falls back to CREATED_AT, and RELEVANCE is descending only.
 // PRICE sorts by price per kg with negotiable listings last in both
-// directions; QUANTITY by remaining quantity. Ties go newest first.
+// directions; QUANTITY by quantity. Ties go newest first.
 func (s *Service) SearchListings(ctx context.Context, p auth.Principal, query string, f domain.ListingFilter,
 	sortBy catalogv1.ListingSortField, dir commonv1.SortDirection, page domain.PageRequest,
 ) (domain.ListingPage, error) {
@@ -129,7 +129,7 @@ func criteria(p auth.Principal, f domain.ListingFilter) (domain.Criteria, error)
 		}
 	}
 	if f.MinQuantity != nil {
-		c.MinRemainingGrams = max(f.MinQuantity.Grams, 0)
+		c.MinQuantityGrams = max(f.MinQuantity.Grams, 0)
 	}
 	var err error
 	if c.MinPricePerTonne, err = perTonne("filter.min_price", f.MinPrice); err != nil {

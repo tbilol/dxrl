@@ -1,7 +1,6 @@
 // Package service is catalog's business logic: the listings of both boards
-// (create, read, update, delete), browsing and search, the product reference
-// data, and the escrow commitments from order-escrow's transaction stream
-// (remaining quantity, SOLD_OUT, transaction-party visibility).
+// (create, read, update, delete), browsing and search, and the product
+// reference data.
 //
 // catalog owns listings and product types only. A listing carries its
 // owner's user id; names, avatars, badges and ratings are profile-social's,
@@ -25,14 +24,6 @@ import (
 	"github.com/tbilol/dxrl/services/catalog/internal/events"
 )
 
-// CallerOrderEscrow is the x-agrogram-caller of order-escrow, which reads
-// listings in any status to snapshot them into transactions (catalog.proto).
-//
-// TODO(security): the header is trusted as is, because the edge strips
-// client-supplied x-agrogram-* values; bind it to a service identity (mTLS
-// or a mesh) once the platform has one.
-const CallerOrderEscrow = "order-escrow"
-
 // Queries is the repository. Methods return domain.ErrNotFound for missing
 // rows. Callers pass every timestamp, so the service clock drives all state.
 type Queries interface {
@@ -52,36 +43,13 @@ type Queries interface {
 	// LockListing returns the listing and holds its row lock for the rest of
 	// the transaction.
 	LockListing(ctx context.Context, id uuid.UUID) (domain.Listing, error)
-	// SaveListing writes l's owner fields, remaining quantity, status,
-	// version and timestamps (never views_count), and doc unless it is nil
-	// (the stored search document stays).
+	// SaveListing writes l's owner fields, status, version and timestamps
+	// (never views_count), and doc unless it is nil (the stored search
+	// document stays).
 	SaveListing(ctx context.Context, l domain.Listing, doc *domain.SearchDocument) error
-	// SaveRemaining writes only l's remaining quantity, status, version and
-	// updated_at (a new escrow commitment); the owner fields, views and the
-	// search document stay.
-	SaveRemaining(ctx context.Context, l domain.Listing) error
 	// FindListings runs a listing query and returns up to q.Limit hits in
 	// the query's order, strictly after q.After.
 	FindListings(ctx context.Context, q domain.ListingQuery) ([]domain.Hit, error)
-
-	// CommittedGrams is the quantity escrow transactions have committed of
-	// the listing: the sum of its transactions' quantities (0 without any).
-	CommittedGrams(ctx context.Context, listingID uuid.UUID) (int64, error)
-	// IsTransactionParty reports whether user is the farmer or the reseller
-	// of an escrow transaction on the listing.
-	IsTransactionParty(ctx context.Context, listingID, user uuid.UUID) (bool, error)
-
-	// MarkProcessed stores an inbox row; false when the event id is known.
-	MarkProcessed(ctx context.Context, e domain.ProcessedEvent) (bool, error)
-	// GetListingTransaction returns the projection of escrow transaction id.
-	GetListingTransaction(ctx context.Context, id uuid.UUID) (domain.ListingTransaction, error)
-	// InsertListingTransaction stores the projection of a transaction seen
-	// for the first time: its commitment.
-	InsertListingTransaction(ctx context.Context, t domain.ListingTransaction) error
-	// UpdateListingTransaction writes t's state, version and updated_at if
-	// t.Version is newer than the stored version, and reports whether it
-	// did. The terms are never written.
-	UpdateListingTransaction(ctx context.Context, t domain.ListingTransaction) (bool, error)
 
 	// GetProductType returns the reference data of t.
 	GetProductType(ctx context.Context, t commonv1.ProductType) (domain.ProductType, error)
@@ -116,7 +84,7 @@ type Service struct {
 	store   Store
 	limiter RateLimiter  // nil: no create rate limit
 	views   ViewRecorder // nil: views are not counted
-	quotas  domain.Quotas
+	quota   int          // ACTIVE listings per owner and board
 	now     func() time.Time
 	log     *slog.Logger
 }
@@ -130,8 +98,8 @@ func WithClock(now func() time.Time) Option { return func(s *Service) { s.now = 
 // WithLogger sets the logger.
 func WithLogger(l *slog.Logger) Option { return func(s *Service) { s.log = l } }
 
-// WithQuotas replaces domain.DefaultQuotas.
-func WithQuotas(q domain.Quotas) Option { return func(s *Service) { s.quotas = q } }
+// WithListingQuota replaces domain.DefaultListingQuota.
+func WithListingQuota(n int) Option { return func(s *Service) { s.quota = n } }
 
 // New returns a Service. limiter and views may be nil: no create rate limit,
 // and views are not counted.
@@ -140,7 +108,7 @@ func New(store Store, limiter RateLimiter, views ViewRecorder, opts ...Option) *
 		store:   store,
 		limiter: limiter,
 		views:   views,
-		quotas:  domain.DefaultQuotas,
+		quota:   domain.DefaultListingQuota,
 		now:     time.Now,
 		log:     slog.New(slog.DiscardHandler),
 	}

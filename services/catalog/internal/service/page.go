@@ -36,7 +36,7 @@ const pageTokenVersion = 1
 type pageToken struct {
 	Version     int     `json:"v"`
 	Fingerprint string  `json:"f"`
-	Key         int64   `json:"k,omitempty"` // price per tonne or remaining grams
+	Key         int64   `json:"k,omitempty"` // price per tonne or quantity in grams
 	Rank        float32 `json:"r,omitempty"` // text rank (float32 round-trips exactly through JSON)
 	At          int64   `json:"t"`           // created_at, Unix microseconds
 	ID          string  `json:"i"`
@@ -55,7 +55,7 @@ func fingerprint(op string, q domain.ListingQuery) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s|sort=%s|desc=%t|kind=%d|owner=%s|district=%q|min_grams=%d|min_price=%s|max_price=%s",
-		op, q.Sort, q.Desc, c.Kind, c.OwnerID, strings.ToLower(c.District), c.MinRemainingGrams,
+		op, q.Sort, q.Desc, c.Kind, c.OwnerID, strings.ToLower(c.District), c.MinQuantityGrams,
 		opt(c.MinPricePerTonne), opt(c.MaxPricePerTonne))
 	fmt.Fprintf(&b, "|products=%v|regions=%v|statuses=%v|terms=%q", c.Products, c.Regions, c.Statuses, c.Terms)
 	sum := sha256.Sum256([]byte(b.String()))

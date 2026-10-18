@@ -18,8 +18,7 @@ func TestFromMetadata(t *testing.T) {
 	user, session := uuid.New(), uuid.New()
 	p, err := FromMetadata(metadata.New(map[string]string{
 		HeaderUserID:         user.String(),
-		HeaderRoles:          " reseller, FARMER ,bogus,,FARMER",
-		HeaderPremium:        "TRUE",
+		HeaderRoles:          " admin, ADMIN ,bogus,,ADMIN",
 		HeaderSessionID:      session.String(),
 		HeaderCaller:         "api-gateway",
 		HeaderRequestID:      "req-123",
@@ -30,12 +29,12 @@ func TestFromMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.UserID != user || !slices.Equal(p.Roles, []commonv1.Role{commonv1.Role_ROLE_RESELLER, commonv1.Role_ROLE_FARMER}) ||
-		!p.Premium || p.SessionID != session.String() || p.Caller != "api-gateway" || p.RequestID != "req-123" ||
+	if p.UserID != user || !slices.Equal(p.Roles, []commonv1.Role{commonv1.Role_ROLE_ADMIN}) ||
+		p.SessionID != session.String() || p.Caller != "api-gateway" || p.RequestID != "req-123" ||
 		p.Traceparent != traceparent || p.Tracestate != "vendor=1" || p.AcceptLanguage != "ru" {
 		t.Fatalf("got %+v", p)
 	}
-	if !p.Authenticated() || !p.Internal() || !p.HasRole(commonv1.Role_ROLE_FARMER) || p.Staff() {
+	if !p.Authenticated() || !p.Internal() || !p.HasRole(commonv1.Role_ROLE_ADMIN) || !p.Staff() {
 		t.Fatalf("helpers disagree: %+v", p)
 	}
 	if p.Actor().GetUserId() != user.String() {
@@ -56,7 +55,7 @@ func TestFromMetadataAnonymousAndSanitized(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p.Authenticated() || p.Internal() || p.Traceparent != "" || p.Tracestate != "" || p.SessionID != "" ||
-		p.Premium || p.AcceptLanguage != "" {
+		p.AcceptLanguage != "" {
 		t.Fatalf("got %+v", p)
 	}
 	if uuid.Validate(p.RequestID) != nil {
