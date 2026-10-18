@@ -68,6 +68,11 @@ services:
     restart: unless-stopped
     environment: *auth-gateway-env
     networks: [agrogram]
+    # Runs as the host user that owns secrets/jwt-es256.pem: `make dev-key`
+    # writes it 0600, which the image's nonroot user could not read through the
+    # bind mount. `make compose-up` passes `id -u`/`id -g`; plain `docker
+    # compose` falls back to 1000:1000 (export AUTH_GATEWAY_UID/GID otherwise).
+    user: "${AUTH_GATEWAY_UID:-1000}:${AUTH_GATEWAY_GID:-1000}"
     volumes:
       # `make dev-key` writes secrets/jwt-es256.pem; it stays outside the image.
       - ../services/auth-gateway/secrets:/run/secrets:ro

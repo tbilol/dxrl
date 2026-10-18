@@ -263,11 +263,16 @@ Same thing without make, from the directory that contains `back/` (three files,
 in this order — relative paths resolve against the first one's directory):
 
 ```sh
+AUTH_GATEWAY_UID=$(id -u) AUTH_GATEWAY_GID=$(id -g) \
 docker compose -f back/deploy/docker-compose.yml \
   -f back/services/identity/compose.yaml \
   -f back/services/auth-gateway/compose.yaml \
   up -d --build --wait auth-gateway
 ```
+
+The container runs as the host user that owns `secrets/jwt-es256.pem` (0600,
+so the image's nonroot user could not read it); without the two variables it
+runs as `1000:1000`.
 
 Stop either `make run` or the container before starting the other: both use
 host ports 15052/18052. `make infra-down` in `back/` also removes the

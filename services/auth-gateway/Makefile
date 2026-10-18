@@ -42,8 +42,9 @@ LOAD_ENV := set -a; if [ -f ./.env ]; then . ./.env; fi; set +a;
 
 # The auth-gateway stack joins the infra project and needs identity; all three
 # files are needed, and Compose reads back/deploy/.env because the first file
-# lives there.
-COMPOSE := cd $(BACK_DIR) && $(DOCKER) compose \
+# lives there. AUTH_GATEWAY_UID/GID run the container as the owner of the
+# 0600 signing key (see compose.yaml).
+COMPOSE := cd $(BACK_DIR) && AUTH_GATEWAY_UID=$$(id -u) AUTH_GATEWAY_GID=$$(id -g) $(DOCKER) compose \
 	-f deploy/docker-compose.yml \
 	-f services/identity/compose.yaml \
 	-f services/auth-gateway/compose.yaml
