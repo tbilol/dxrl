@@ -12,7 +12,6 @@ import "common/v1/pagination.proto";
 import "common/v1/product.proto";
 import "common/v1/quantity.proto";
 import "events/v1/listing.proto";
-import "events/v1/profile.proto";
 import "google/protobuf/field_mask.proto";
 import "google/protobuf/timestamp.proto";
 
@@ -20,28 +19,25 @@ import "google/protobuf/timestamp.proto";
 // buy-requests. Both are one Listing model; `kind` tells them apart. It also
 // serves the product reference data.
 //
-// Posting rules, checked on create: offers need ROLE_FARMER
-// (FARMER_VERIFICATION_REQUIRED); each kind has a plan quota
-// (PLAN_LIMIT_REACHED); a video needs Premium (PREMIUM_REQUIRED). The service
-// publishes the listing stream (agrogram.catalog.listing.v1), builds listing
-// owner cards from the profile stream, and tracks remaining quantity from the
-// transaction stream. order-escrow calls GetListing to snapshot a listing into
-// a transaction.
+// Posting rules, checked on create: any signed-in user may post on either
+// board (the board is `kind`, not a role); each board has a flat quota of
+// ACTIVE listings per user (LISTING_LIMIT_REACHED). Buyers and sellers
+// contact each other directly (the listing's phone). The service publishes
+// the listing stream (agrogram.catalog.listing.v1).
 service CatalogService {
   // Posts a listing on the board its `kind` names.
-  // Errors: FARMER_VERIFICATION_REQUIRED, PLAN_LIMIT_REACHED, PREMIUM_REQUIRED.
+  // Errors: LISTING_LIMIT_REACHED.
   rpc CreateListing(CreateListingRequest) returns (CreateListingResponse);
 
-  // Returns a listing. Non-ACTIVE listings are visible to their owner, to the
-  // parties of transactions on them, and to staff.
+  // Returns a listing. Non-ACTIVE listings are visible to their owner and to
+  // staff.
   rpc GetListing(GetListingRequest) returns (GetListingResponse);
 
   // Updates the caller's listing. `kind` cannot change.
-  // Errors: CONFLICT (stale expected_version), PREMIUM_REQUIRED.
+  // Errors: CONFLICT (stale expected_version), LISTING_NOT_ACTIVE.
   rpc UpdateListing(UpdateListingRequest) returns (UpdateListingResponse);
 
-  // Deletes the caller's listing (soft delete, status DELETED). Transactions
-  // already started on it continue.
+  // Deletes the caller's listing (soft delete, status DELETED).
   rpc DeleteListing(DeleteListingRequest) returns (DeleteListingResponse);
 
   // Browses a board, or one owner's listings, newest first.
@@ -64,12 +60,16 @@ enum ListingSortField {
   LISTING_SORT_FIELD_CREATED_AT = 2;
   // Price per kg; negotiable listings sort last.
   LISTING_SORT_FIELD_PRICE = 3;
-  // Remaining quantity.
+  // Posted quantity.
   LISTING_SORT_FIELD_QUANTITY = 4;
 }
 
 // Listing is a sell offer (farmers' board) or a buy-request (resellers' board).
 message Listing {
+  // The quantity not yet committed to escrow transactions: no escrow any more.
+  reserved 6;
+  reserved "remaining_quantity";
+
   // Output only. Listing id (UUID).
   string id = 1 [
     (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
@@ -97,9 +97,6 @@ message Listing {
     expression: "this.grams > 0"
   }];
 
-  // Output only. Quantity not yet committed to escrow transactions.
-  common.v1.Mass remaining_quantity = 6;
-
   // Price per kg or tonne in UZS: the asking price of an offer, the offered
   // price of a buy-request. Unset = negotiable ("kelishiladi").
   common.v1.UnitPrice price = 7 [(buf.validate.field).cel = {
@@ -121,14 +118,15 @@ message Listing {
   // Free-text description: quality, packaging, loading conditions.
   string notes = 10 [(buf.validate.field).string.max_len = 1000];
 
-  // Photos and, on Premium, one short video, in display order. Uploads with
-  // purpose MEDIA_PURPOSE_LISTING_IMAGE / MEDIA_PURPOSE_LISTING_VIDEO.
+  // Photos and at most one short video (free for everyone), in display
+  // order. Uploads with purpose MEDIA_PURPOSE_LISTING_IMAGE /
+  // MEDIA_PURPOSE_LISTING_VIDEO.
   repeated common.v1.MediaRef media = 11 [(buf.validate.field).repeated.max_items = 10];
 
   // Output only. Life-cycle status.
   agrogram.events.v1.ListingStatus status = 12;
 
-  // Output only. Owner card, projected from the profile stream.
+  // Output only. Owner card (user id; the edge adds name and avatar).
   ListingOwner owner = 13;
 
   // Output only. How many times the listing was opened.
@@ -146,6 +144,10 @@ message Listing {
 
 // ListingOwner is the owner card shown on a listing.
 message ListingOwner {
+  // Rating and badges: no ratings, one flat tier, no farmer verification.
+  reserved 4 to 6;
+  reserved "rating", "is_premium", "is_verified_farmer";
+
   // Owner user id.
   string user_id = 1;
 
@@ -154,15 +156,6 @@ message ListingOwner {
 
   // Profile picture.
   common.v1.MediaRef avatar = 3;
-
-  // Aggregate rating.
-  agrogram.events.v1.RatingSummary rating = 4;
-
-  // Premium badge.
-  bool is_premium = 5;
-
-  // E-ijara-verified farmer badge.
-  bool is_verified_farmer = 6;
 }
 
 // ListingFilter narrows ListListings and SearchListings. Unset fields do not
@@ -223,7 +216,7 @@ message ListingFilter {
     }
   }];
 
-  // At least this much remaining quantity.
+  // At least this much quantity.
   common.v1.Mass min_quantity = 7;
 
   // At least this price. Excludes negotiable listings.

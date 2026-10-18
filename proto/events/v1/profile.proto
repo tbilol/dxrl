@@ -14,44 +14,32 @@ import "google/protobuf/timestamp.proto";
 //   Topic      agrogram.profilesocial.profile.v1
 //   Key        user_id
 //   Producer   profile-social
-//   Consumers  catalog (owner card on listings), analytics (trader boards),
-//              notification ("you received a rating")
+//   Consumers  catalog (owner card on listings, later)
 //
-// Events: RatingUpdated. Later event types (for example ProfileUpdated) are
-// new `oneof` cases and do not break consumers.
-
-// RatingSummary is a user's aggregate rating from completed transactions.
-// Shared by the profile-social and catalog APIs and this stream.
-message RatingSummary {
-  // Mean score, 1.0-5.0; 0 when there are no ratings yet. For display only.
-  double average = 1 [(buf.validate.field).double = {
-    gte: 0
-    lte: 5
-  }];
-
-  // Number of ratings received.
-  int64 count = 2 [(buf.validate.field).int64.gte = 0];
-}
+// Events: none today. RatingUpdated, the only one, was removed with ratings
+// (the listings-only pivot), and so was RatingSummary. The next event type
+// (for example ProfileUpdated) brings back the `oneof event`, from 11.
 
 // ProfileEvent is the envelope of the profile stream, one per Kafka record.
 message ProfileEvent {
+  // The rating_updated case of the former `oneof event`.
+  reserved 10;
+  reserved "rating_updated";
+
   // Event header.
   EventMetadata metadata = 1 [(buf.validate.field).required = true];
 
   // The profile after the event.
   ProfileSnapshot profile = 2 [(buf.validate.field).required = true];
-
-  // The concrete event. Producers set exactly one case. The oneof is not
-  // `required` on purpose: a consumer on an older schema sees a newer case as
-  // unset and must still accept the record (see metadata.proto).
-  oneof event {
-    // The user's rating changed.
-    RatingUpdated rating_updated = 10;
-  }
 }
 
 // ProfileSnapshot is the public state of a profile. No contact details.
 message ProfileSnapshot {
+  // Rating, deals and badges: no transactions, one flat tier, no farmer
+  // verification.
+  reserved 6, 7, 10, 11;
+  reserved "rating", "deals_count", "is_verified_farmer", "is_premium";
+
   // User id (UUID). Equals the record key.
   string id = 1 [(buf.validate.field).string.uuid = true];
 
@@ -70,23 +58,11 @@ message ProfileSnapshot {
   // District or city within the region (free text).
   string district = 5 [(buf.validate.field).string.max_len = 120];
 
-  // Aggregate rating.
-  RatingSummary rating = 6 [(buf.validate.field).required = true];
-
-  // Completed escrow transactions, as farmer or reseller.
-  int64 deals_count = 7 [(buf.validate.field).int64.gte = 0];
-
   // Users following this user.
   int64 follower_count = 8 [(buf.validate.field).int64.gte = 0];
 
   // Users this user follows.
   int64 following_count = 9 [(buf.validate.field).int64.gte = 0];
-
-  // E-ijara-verified farmer. Mirrored from identity.
-  bool is_verified_farmer = 10;
-
-  // Premium plan active (badge). Mirrored from identity.
-  bool is_premium = 11;
 
   // Aggregate version; equals EventMetadata.aggregate_version.
   int64 version = 12 [(buf.validate.field).int64.gte = 1];
@@ -96,24 +72,4 @@ message ProfileSnapshot {
 
   // When the profile last changed.
   google.protobuf.Timestamp updated_at = 14 [(buf.validate.field).required = true];
-}
-
-// RatingUpdated: the user received a rating for a completed transaction and
-// their aggregate changed. The new aggregate is `profile.rating` in the
-// envelope snapshot.
-message RatingUpdated {
-  // The rating that caused the change (UUID).
-  string rating_id = 1 [(buf.validate.field).string.uuid = true];
-
-  // Who gave it: the other party of the transaction.
-  string rater_id = 2 [(buf.validate.field).string.uuid = true];
-
-  // The completed transaction that was rated.
-  string transaction_id = 3 [(buf.validate.field).string.uuid = true];
-
-  // Score given, 1-5.
-  int32 score = 4 [(buf.validate.field).int32 = {
-    gte: 1
-    lte: 5
-  }];
 }

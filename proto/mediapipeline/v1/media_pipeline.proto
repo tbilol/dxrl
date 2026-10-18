@@ -6,7 +6,6 @@ import "buf/validate/validate.proto";
 import "common/v1/error.proto";
 import "common/v1/media.proto";
 import "common/v1/resource.proto";
-import "events/v1/media.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
@@ -18,12 +17,10 @@ import "google/protobuf/timestamp.proto";
 //
 //   MEDIA_PURPOSE_LISTING_IMAGE        IMAGE_RENDITIONS   image, max 10 MB
 //   MEDIA_PURPOSE_AVATAR               IMAGE_RENDITIONS   image, max 5 MB
-//   MEDIA_PURPOSE_LISTING_VIDEO        VIDEO_TRANSCODE    video, max 100 MB and 60 s; Premium
-//   MEDIA_PURPOSE_WEIGHBRIDGE_RECEIPT  RECEIPT_OCR        image, max 10 MB; private
+//   MEDIA_PURPOSE_LISTING_VIDEO        VIDEO_TRANSCODE    video, max 100 MB and 60 s; free for everyone
 //
 // Limits are configuration; the numbers above are the starting values.
-// Errors: UNSUPPORTED_MEDIA_TYPE, MEDIA_TOO_LARGE, PREMIUM_REQUIRED,
-// MEDIA_PROCESSING_FAILED.
+// Errors: UNSUPPORTED_MEDIA_TYPE, MEDIA_TOO_LARGE, MEDIA_PROCESSING_FAILED.
 service MediaPipelineService {
   // Creates a media object (PENDING_UPLOAD) and a pre-signed upload URL.
   rpc CreateUpload(CreateUploadRequest) returns (CreateUploadResponse);
@@ -49,14 +46,15 @@ service MediaPipelineService {
 
 // ProcessingJobKind is the work a processing job does.
 enum ProcessingJobKind {
+  // RECEIPT_OCR (3) read escrow weighbridge receipts; escrow is gone.
+  reserved 3;
+  reserved "PROCESSING_JOB_KIND_RECEIPT_OCR";
+
   PROCESSING_JOB_KIND_UNSPECIFIED = 0;
   // Resize and re-encode an image into display and thumbnail renditions.
   PROCESSING_JOB_KIND_IMAGE_RENDITIONS = 1;
   // Transcode a short video for streaming and extract a poster frame.
   PROCESSING_JOB_KIND_VIDEO_TRANSCODE = 2;
-  // Read the ticket number and weights from a weighbridge receipt photo.
-  // TODO(weighbridge): OCR is not implemented yet.
-  PROCESSING_JOB_KIND_RECEIPT_OCR = 3;
 }
 
 // ProcessingJobStatus is where a processing job stands.
@@ -128,6 +126,10 @@ message Media {
 
 // ProcessingJob is one unit of processing for a media object.
 message ProcessingJob {
+  // The receipt_ocr result case (RECEIPT_OCR jobs).
+  reserved 7;
+  reserved "receipt_ocr";
+
   // Job id (UUID).
   string id = 1;
 
@@ -147,9 +149,6 @@ message ProcessingJob {
 
     // VIDEO_TRANSCODE output.
     VideoTranscodeResult video_transcode = 6;
-
-    // RECEIPT_OCR output.
-    agrogram.events.v1.ReceiptOcrResult receipt_ocr = 7;
   }
 
   // Why the job failed (status FAILED).
@@ -242,8 +241,8 @@ message CreateUploadRequest {
     lte: 209715200
   }];
 
-  // Resource the file belongs to: the listing (listing media), the caller
-  // (avatar) or the transaction (weighbridge receipt).
+  // Resource the file belongs to: the listing (listing media) or the caller
+  // (avatar).
   common.v1.ResourceRef attach_to = 5;
 
   // Original file name, for support and downloads.

@@ -78,22 +78,10 @@ func TestFrom(t *testing.T) {
 	}
 }
 
-// retiredReasons are still in error.proto until the listings-only contract
-// change removes them; nothing may return them, so they have no code.
-// TODO(pivot): delete this list with the reasons.
-var retiredReasons = map[string]bool{
-	"ERROR_REASON_PREMIUM_REQUIRED": true, "ERROR_REASON_FARMER_VERIFICATION_REQUIRED": true,
-	"ERROR_REASON_LEASE_CONTRACT_INVALID": true, "ERROR_REASON_LEASE_CONTRACT_ALREADY_CLAIMED": true,
-	"ERROR_REASON_INSUFFICIENT_QUANTITY": true, "ERROR_REASON_INVALID_STATE_TRANSITION": true,
-	"ERROR_REASON_NOT_TRANSACTION_PARTY": true, "ERROR_REASON_PAYMENT_FAILED": true,
-	"ERROR_REASON_RECEIPT_REJECTED": true, "ERROR_REASON_SELF_TRADE_NOT_ALLOWED": true,
-	"ERROR_REASON_RATING_NOT_ALLOWED": true, "ERROR_REASON_ALREADY_RATED": true,
-}
-
 func TestEveryReasonHasACode(t *testing.T) {
 	for v, name := range commonv1.ErrorReason_name {
 		r := commonv1.ErrorReason(v)
-		if r == commonv1.ErrorReason_ERROR_REASON_UNSPECIFIED || retiredReasons[name] {
+		if r == commonv1.ErrorReason_ERROR_REASON_UNSPECIFIED {
 			continue
 		}
 		if c := CodeOf(r); c == codes.Unknown || c == codes.OK {

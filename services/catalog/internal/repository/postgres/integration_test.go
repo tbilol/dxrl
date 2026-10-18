@@ -223,7 +223,7 @@ func TestIntegrationListings(t *testing.T) {
 				switch {
 				case err == nil:
 					ok++
-				case errors.As(err, &ae) && ae.Reason == commonv1.ErrorReason_ERROR_REASON_PLAN_LIMIT_REACHED:
+				case errors.As(err, &ae) && ae.Reason == commonv1.ErrorReason_ERROR_REASON_LISTING_LIMIT_REACHED:
 					lim++
 				default:
 					t.Errorf("create: %v", err)

@@ -107,20 +107,19 @@ func NewListingEvent(c ListingChange) (Message, error) {
 // contact details), and so are the owner card and views.
 func Snapshot(l domain.Listing) *eventsv1.ListingSnapshot {
 	return &eventsv1.ListingSnapshot{
-		Id:                l.ID.String(),
-		Kind:              l.Kind,
-		OwnerId:           l.OwnerID.String(),
-		Product:           l.Product,
-		Quantity:          l.Quantity.Proto(),
-		RemainingQuantity: l.Quantity.Proto(), // TODO(pivot): still required by listing.proto; dropped with the field
-		Price:             l.Price.Proto(),
-		Address:           l.Address.Proto(),
-		Notes:             l.Notes,
-		Media:             domain.MediaRefs(l.MediaIDs), // TODO(media): ids only
-		Status:            l.Status,
-		Version:           l.Version,
-		CreatedAt:         timestamppb.New(l.CreatedAt),
-		UpdatedAt:         timestamppb.New(l.UpdatedAt),
+		Id:        l.ID.String(),
+		Kind:      l.Kind,
+		OwnerId:   l.OwnerID.String(),
+		Product:   l.Product,
+		Quantity:  l.Quantity.Proto(),
+		Price:     l.Price.Proto(),
+		Address:   l.Address.Proto(),
+		Notes:     l.Notes,
+		Media:     domain.MediaRefs(l.MediaIDs), // TODO(media): ids only
+		Status:    l.Status,
+		Version:   l.Version,
+		CreatedAt: timestamppb.New(l.CreatedAt),
+		UpdatedAt: timestamppb.New(l.UpdatedAt),
 	}
 }
 

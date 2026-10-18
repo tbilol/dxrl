@@ -330,12 +330,12 @@ func TestHandlerPassesQueriesThrough(t *testing.T) {
 }
 
 func TestErrorsCarryOneDetail(t *testing.T) {
-	svc := &stubService{err: apperr.New(commonv1.ErrorReason_ERROR_REASON_PLAN_LIMIT_REACHED, "quota",
+	svc := &stubService{err: apperr.New(commonv1.ErrorReason_ERROR_REASON_LISTING_LIMIT_REACHED, "quota",
 		"plan", "default", "listing_kind", "OFFER", "limit", "5")}
 	client, _ := dial(t, svc)
 	_, err := client.GetListing(context.Background(), &catalogv1.GetListingRequest{ListingId: uuid.NewString()})
 	e := detail(t, err, codes.ResourceExhausted)
-	if e.GetReason() != commonv1.ErrorReason_ERROR_REASON_PLAN_LIMIT_REACHED || e.GetMetadata()["limit"] != "5" {
+	if e.GetReason() != commonv1.ErrorReason_ERROR_REASON_LISTING_LIMIT_REACHED || e.GetMetadata()["limit"] != "5" {
 		t.Fatalf("error = %v", e)
 	}
 

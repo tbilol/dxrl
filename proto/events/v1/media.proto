@@ -5,7 +5,6 @@ package agrogram.events.v1;
 import "buf/validate/validate.proto";
 import "common/v1/error.proto";
 import "common/v1/media.proto";
-import "common/v1/quantity.proto";
 import "common/v1/resource.proto";
 import "events/v1/metadata.proto";
 import "google/protobuf/duration.proto";
@@ -17,39 +16,11 @@ import "google/protobuf/timestamp.proto";
 //   Topic      agrogram.mediapipeline.media.v1
 //   Key        media_id
 //   Producer   media-pipeline
-//   Consumers  catalog (listing photos and video), profile-social (avatars),
-//              order-escrow (weighbridge receipt photos)
+//   Consumers  catalog (listing photos and video), profile-social (avatars)
 //
-// Events: MediaUploaded. Processing results (renditions, OCR) are part of the
+// Events: MediaUploaded. Processing results (renditions) are part of the
 // snapshot; an event for "processing finished" (for example MediaProcessed)
 // is a later, non-breaking `oneof` addition.
-
-// ReceiptOcrResult is what OCR read from a weighbridge ticket photo. Shared by
-// the media-pipeline API and this stream.
-//
-// TODO(weighbridge): OCR is not implemented yet.
-message ReceiptOcrResult {
-  // Ticket number.
-  string ticket_number = 1 [(buf.validate.field).string.max_len = 64];
-
-  // Loaded vehicle weight.
-  common.v1.Mass gross_mass = 2;
-
-  // Empty vehicle weight.
-  common.v1.Mass tare_mass = 3;
-
-  // Goods weight (gross - tare).
-  common.v1.Mass net_mass = 4;
-
-  // Weighing time printed on the ticket.
-  google.protobuf.Timestamp weighed_at = 5;
-
-  // OCR confidence for the whole ticket, 0-100.
-  int32 confidence_percent = 6 [(buf.validate.field).int32 = {
-    gte: 0
-    lte: 100
-  }];
-}
 
 // MediaEvent is the envelope of the media stream, one per Kafka record.
 message MediaEvent {
@@ -69,8 +40,12 @@ message MediaEvent {
 }
 
 // MediaSnapshot is the state of an uploaded media object. URLs are published
-// for public purposes only; weighbridge receipts never carry URLs here.
+// for public purposes only.
 message MediaSnapshot {
+  // The weighbridge receipt OCR result (ReceiptOcrResult): escrow is gone.
+  reserved 12;
+  reserved "receipt_ocr";
+
   // Media id (UUID). Equals the record key.
   string id = 1 [(buf.validate.field).string.uuid = true];
 
@@ -95,7 +70,7 @@ message MediaSnapshot {
     (buf.validate.field).enum.defined_only = true
   ];
 
-  // Resource the file belongs to (listing, user, transaction), when known.
+  // Resource the file belongs to (listing, user), when known.
   common.v1.ResourceRef attached_to = 6;
 
   // MIME type of the original file, e.g. "image/jpeg".
@@ -116,9 +91,6 @@ message MediaSnapshot {
 
   // Length of a video.
   google.protobuf.Duration duration = 11;
-
-  // OCR result of a weighbridge receipt photo, once processed.
-  ReceiptOcrResult receipt_ocr = 12;
 
   // Why processing failed (status FAILED).
   common.v1.Error error = 13;

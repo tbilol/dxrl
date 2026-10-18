@@ -4,8 +4,6 @@ package agrogram.events.v1;
 
 import "buf/validate/validate.proto";
 import "common/v1/auth.proto";
-import "common/v1/error.proto";
-import "common/v1/time.proto";
 import "events/v1/metadata.proto";
 import "google/protobuf/timestamp.proto";
 
@@ -15,27 +13,23 @@ import "google/protobuf/timestamp.proto";
 //   Topic      agrogram.identity.account.v1
 //   Key        user_id
 //   Producer   identity
-//   Consumers  profile-social (verified-farmer and Premium badges on profiles)
+//   Consumers  profile-social (the account projection on profiles: roles)
 //
 // Identity writes each event to its outbox in the transaction that makes the
 // change:
 //
-//   Event                        Snapshot after                Triggered by
-//   AccountCreated               version 1, ROLE_RESELLER      CreateAccount (auth-gateway, first sign-in)
-//   FarmerVerified               unchanged                     e-ijara confirmed the lease (SubmitFarmerVerification, or a worker retry)
-//   FarmerVerificationRejected   unchanged                     e-ijara refused the contract, or another account holds it
-//   FarmerVerificationExpired    unchanged                     identity's worker, the day after the lease's last day
-//   AccountRoleChanged           new roles, version + 1        ROLE_FARMER granted after FarmerVerified, revoked after FarmerVerificationExpired
-//   AccountPremiumChanged        new is_premium, version + 1   SetAccountPremium
+//   Event                Snapshot after              Triggered by
+//   AccountCreated       version 1, no roles         CreateAccount (auth-gateway, first sign-in)
+//   AccountRoleChanged   new roles, version + 1      a role grant or revoke (ADMIN; no RPC yet)
 //
-// When one change produces two events (FarmerVerified then AccountRoleChanged,
-// FarmerVerificationExpired then AccountRoleChanged), they are published in
-// that order and each snapshot is the account right after its own event.
-// AccountRoleChanged and AccountPremiumChanged are published only when the
-// value really changed. The farmer verification status is not part of the
-// snapshot, because the account version does not cover it; it travels in the
-// FarmerVerif* events. Later event types (for example a block or delete) are
-// new `oneof` cases and do not break consumers.
+// AccountRoleChanged is published only when the role set really changed.
+// Later event types (for example a block or delete) are new `oneof` cases and
+// do not break consumers.
+//
+// Removed with the listings-only pivot (the case numbers are reserved): the
+// Premium and farmer verification events, AccountPremiumChanged (12),
+// FarmerVerified (13), FarmerVerificationRejected (14) and
+// FarmerVerificationExpired (15).
 
 // AccountEvent is the envelope of the account stream, one per Kafka record.
 message AccountEvent {
@@ -45,6 +39,9 @@ message AccountEvent {
   // The account after the event.
   AccountSnapshot account = 2 [(buf.validate.field).required = true];
 
+  reserved 12 to 15;
+  reserved "account_premium_changed", "farmer_verified", "farmer_verification_rejected", "farmer_verification_expired";
+
   // The concrete event. Producers set exactly one case. The oneof is not
   // `required` on purpose: a consumer on an older schema sees a newer case as
   // unset and must still accept the record (see metadata.proto).
@@ -53,21 +50,17 @@ message AccountEvent {
     AccountCreated account_created = 10;
     // Roles were granted or revoked.
     AccountRoleChanged account_role_changed = 11;
-    // Premium was turned on or off.
-    AccountPremiumChanged account_premium_changed = 12;
-    // e-ijara confirmed a land-lease contract.
-    FarmerVerified farmer_verified = 13;
-    // e-ijara did not confirm a land-lease contract.
-    FarmerVerificationRejected farmer_verification_rejected = 14;
-    // A verified land lease ended.
-    FarmerVerificationExpired farmer_verification_expired = 15;
   }
 }
 
-// AccountSnapshot is the state of an account that identity owns: the role set
-// and Premium. No contact details or credentials (those are in auth-gateway);
-// names and avatars are in profile-social.
+// AccountSnapshot is the state of an account that identity owns: the role
+// set. No contact details or credentials (those are in auth-gateway); names
+// and avatars are in profile-social.
 message AccountSnapshot {
+  // Verified-farmer and Premium badges: no verification, one flat tier.
+  reserved 3 to 5;
+  reserved "is_verified_farmer", "is_premium", "premium_until";
+
   // User id (UUID). Equals the record key.
   string id = 1 [(buf.validate.field).string.uuid = true];
 
@@ -82,16 +75,6 @@ message AccountSnapshot {
     }
   }];
 
-  // Holds ROLE_FARMER (e-ijara-verified farmer).
-  bool is_verified_farmer = 3;
-
-  // Premium plan active at EventMetadata.occurred_at.
-  bool is_premium = 4;
-
-  // When the current Premium period ends. Unset when Premium has no end date
-  // or is off. Identity publishes no event when this moment passes.
-  google.protobuf.Timestamp premium_until = 5;
-
   // Aggregate version; equals EventMetadata.aggregate_version.
   int64 version = 6 [(buf.validate.field).int64.gte = 1];
 
@@ -103,15 +86,17 @@ message AccountSnapshot {
 }
 
 // AccountCreated: auth-gateway created the account on a first sign-in. The
-// account is the envelope snapshot (ROLE_RESELLER, not Premium, version 1);
-// there are no creation-only details.
+// account is the envelope snapshot (no roles, version 1); there are no
+// creation-only details.
 message AccountCreated {}
 
-// AccountRoleChanged: the account's role set changed (old -> new). Today only
-// ROLE_FARMER changes: it is granted when e-ijara verifies a land lease
-// (after FarmerVerified) and revoked when the last verified lease ends (after
-// FarmerVerificationExpired).
+// AccountRoleChanged: the account's role set changed (old -> new). ADMIN is
+// the only role; nothing grants it through the API yet.
 message AccountRoleChanged {
+  // The farmer verification that caused the change: no verification any more.
+  reserved 5;
+  reserved "farmer_verification_id";
+
   option (buf.validate.message).cel = {
     id: "account_role_changed.has_change"
     message: "granted_roles and revoked_roles must not both be empty"
@@ -161,62 +146,4 @@ message AccountRoleChanged {
       }
     }
   }];
-
-  // The farmer verification that caused the change (UUID). Empty when no
-  // verification did.
-  string farmer_verification_id = 5 [
-    (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
-    (buf.validate.field).string.uuid = true
-  ];
-}
-
-// AccountPremiumChanged: Premium was turned on or off (SetAccountPremium).
-// Published only when the value really changed, so the value before it is
-// the opposite of `is_premium`.
-message AccountPremiumChanged {
-  // Premium is active after the change; equals account.is_premium.
-  bool is_premium = 1;
-}
-
-// FarmerVerified: e-ijara confirmed an active land-lease contract and the
-// verification is VERIFIED. ROLE_FARMER is granted by the AccountRoleChanged
-// published right after it, unless the account already held the role. The
-// contract number is not published; read it with GetFarmerVerification.
-message FarmerVerified {
-  // The verification (UUID), a RESOURCE_TYPE_FARMER_VERIFICATION.
-  string verification_id = 1 [(buf.validate.field).string.uuid = true];
-
-  // First day of the lease.
-  common.v1.Date lease_valid_from = 2 [(buf.validate.field).required = true];
-
-  // Last day of the lease. The verification expires the day after it
-  // (Asia/Tashkent).
-  common.v1.Date lease_valid_until = 3 [(buf.validate.field).required = true];
-}
-
-// FarmerVerificationRejected: e-ijara did not confirm the contract, or the
-// contract is bound to another account. Roles do not change.
-message FarmerVerificationRejected {
-  // The verification (UUID), a RESOURCE_TYPE_FARMER_VERIFICATION.
-  string verification_id = 1 [(buf.validate.field).string.uuid = true];
-
-  // Why: ERROR_REASON_LEASE_CONTRACT_INVALID or
-  // ERROR_REASON_LEASE_CONTRACT_ALREADY_CLAIMED.
-  common.v1.ErrorReason rejection_reason = 2 [(buf.validate.field).enum = {
-    in: [
-      301,
-      302
-    ]
-  }];
-}
-
-// FarmerVerificationExpired: the lease of a VERIFIED verification ended and the
-// verification is EXPIRED. Unless another verified lease remains, ROLE_FARMER
-// is revoked by the AccountRoleChanged published right after it.
-message FarmerVerificationExpired {
-  // The verification (UUID), a RESOURCE_TYPE_FARMER_VERIFICATION.
-  string verification_id = 1 [(buf.validate.field).string.uuid = true];
-
-  // Last day of the lease that ended.
-  common.v1.Date lease_valid_until = 2 [(buf.validate.field).required = true];
 }

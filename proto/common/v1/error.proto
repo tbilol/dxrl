@@ -9,6 +9,18 @@ package agrogram.common.v1;
 // Values are grouped in numeric ranges per domain; add new values, never
 // renumber or reuse old ones.
 enum ErrorReason {
+  // Retired with the listings-only pivot (no Premium plan, no farmer
+  // verification, no escrow transactions, no ratings). PLAN_LIMIT_REACHED
+  // (201) became LISTING_LIMIT_REACHED (202).
+  reserved 200, 201, 300 to 302, 401, 500 to 504, 601, 602;
+  reserved "ERROR_REASON_PREMIUM_REQUIRED", "ERROR_REASON_PLAN_LIMIT_REACHED";
+  reserved "ERROR_REASON_FARMER_VERIFICATION_REQUIRED", "ERROR_REASON_LEASE_CONTRACT_INVALID";
+  reserved "ERROR_REASON_LEASE_CONTRACT_ALREADY_CLAIMED", "ERROR_REASON_INSUFFICIENT_QUANTITY";
+  reserved "ERROR_REASON_INVALID_STATE_TRANSITION", "ERROR_REASON_NOT_TRANSACTION_PARTY";
+  reserved "ERROR_REASON_PAYMENT_FAILED", "ERROR_REASON_RECEIPT_REJECTED";
+  reserved "ERROR_REASON_SELF_TRADE_NOT_ALLOWED", "ERROR_REASON_RATING_NOT_ALLOWED";
+  reserved "ERROR_REASON_ALREADY_RATED";
+
   ERROR_REASON_UNSPECIFIED = 0;
 
   // ---- Generic (1-99) ----------------------------------------------------
@@ -27,10 +39,9 @@ enum ErrorReason {
   ERROR_REASON_PERMISSION_DENIED = 6;
   // RESOURCE_EXHAUSTED. Too many requests; retry after the indicated delay.
   ERROR_REASON_RATE_LIMITED = 7;
-  // UNIMPLEMENTED. The contract exists but the behaviour is still a stub
-  // (for example the tax and payment-provider parts of order-escrow).
+  // UNIMPLEMENTED. The contract exists but the behaviour is still a stub.
   ERROR_REASON_NOT_IMPLEMENTED = 8;
-  // UNAVAILABLE. A downstream dependency (e-ijara, payment provider, ...) is down.
+  // UNAVAILABLE. A downstream dependency (another service, an SMS provider, ...) is down.
   ERROR_REASON_DEPENDENCY_UNAVAILABLE = 9;
   // INTERNAL. Unexpected server error.
   ERROR_REASON_INTERNAL = 10;
@@ -58,55 +69,22 @@ enum ErrorReason {
   // INVALID_ARGUMENT. One-time SMS code is wrong or expired.
   ERROR_REASON_OTP_INVALID = 108;
 
-  // ---- Plans & entitlements (200-299) --------------------------------------
+  // ---- Quotas (200-299) ---------------------------------------------------
 
-  // PERMISSION_DENIED. Feature needs the Premium plan (yield calculator,
-  // listing video, badge).
-  ERROR_REASON_PREMIUM_REQUIRED = 200;
-  // RESOURCE_EXHAUSTED. Listing quota for the plan is used up
-  // (Default: 5 offers / 5 buy-requests; Premium: 20 / 25).
-  // metadata: {"plan", "listing_kind", "limit"}.
-  ERROR_REASON_PLAN_LIMIT_REACHED = 201;
-
-  // ---- Farmer verification / e-ijara (300-399) -----------------------------
-
-  // FAILED_PRECONDITION. Posting sell offers requires an e-ijara-verified farmer.
-  ERROR_REASON_FARMER_VERIFICATION_REQUIRED = 300;
-  // FAILED_PRECONDITION. e-ijara has no active land-lease contract with this number.
-  ERROR_REASON_LEASE_CONTRACT_INVALID = 301;
-  // ALREADY_EXISTS. The lease contract is already bound to another account.
-  ERROR_REASON_LEASE_CONTRACT_ALREADY_CLAIMED = 302;
+  // RESOURCE_EXHAUSTED. The user already has the maximum number of ACTIVE
+  // listings on this board (one flat tier: 10 per board).
+  // metadata: {"listing_kind", "limit"}.
+  ERROR_REASON_LISTING_LIMIT_REACHED = 202;
 
   // ---- Listings (400-499) --------------------------------------------------
 
-  // FAILED_PRECONDITION. The listing is closed, sold out or blocked.
+  // FAILED_PRECONDITION. The listing is closed or blocked.
   ERROR_REASON_LISTING_NOT_ACTIVE = 400;
-  // FAILED_PRECONDITION. Requested quantity exceeds what the listing still offers.
-  ERROR_REASON_INSUFFICIENT_QUANTITY = 401;
-
-  // ---- Escrow transactions (500-599) ---------------------------------------
-
-  // FAILED_PRECONDITION. The command is not valid in the transaction's current state.
-  // metadata: {"state", "command"}.
-  ERROR_REASON_INVALID_STATE_TRANSITION = 500;
-  // PERMISSION_DENIED. The caller is not the farmer or reseller of this transaction,
-  // or is the wrong party for this step.
-  ERROR_REASON_NOT_TRANSACTION_PARTY = 501;
-  // FAILED_PRECONDITION. The pay-in was declined or could not be confirmed.
-  ERROR_REASON_PAYMENT_FAILED = 502;
-  // FAILED_PRECONDITION. The weighbridge receipt (tarozi cheki) failed verification.
-  ERROR_REASON_RECEIPT_REJECTED = 503;
-  // FAILED_PRECONDITION. A party cannot trade with itself.
-  ERROR_REASON_SELF_TRADE_NOT_ALLOWED = 504;
 
   // ---- Social (600-699) ----------------------------------------------------
 
-  // INVALID_ARGUMENT. Users cannot follow or rate themselves.
+  // INVALID_ARGUMENT. Users cannot follow themselves.
   ERROR_REASON_SELF_ACTION_NOT_ALLOWED = 600;
-  // FAILED_PRECONDITION. Ratings need a completed transaction between the two users.
-  ERROR_REASON_RATING_NOT_ALLOWED = 601;
-  // ALREADY_EXISTS. This transaction has already been rated by the caller.
-  ERROR_REASON_ALREADY_RATED = 602;
 
   // ---- Media (700-799) -----------------------------------------------------
 
@@ -114,7 +92,7 @@ enum ErrorReason {
   ERROR_REASON_UNSUPPORTED_MEDIA_TYPE = 700;
   // INVALID_ARGUMENT. File size or video duration exceeds the purpose's limit.
   ERROR_REASON_MEDIA_TOO_LARGE = 701;
-  // FAILED_PRECONDITION. Transcoding / image processing / OCR failed.
+  // FAILED_PRECONDITION. Transcoding or image processing failed.
   ERROR_REASON_MEDIA_PROCESSING_FAILED = 702;
 }
 
@@ -131,7 +109,7 @@ message Error {
   // Developer-facing English description. Never shown to end users.
   string message = 2;
 
-  // Service that produced the error, e.g. "order-escrow".
+  // Service that produced the error, e.g. "catalog".
   string domain = 3;
 
   // Structured context, e.g. {"plan": "default", "limit": "5"}. Keys are

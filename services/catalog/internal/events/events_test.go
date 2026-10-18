@@ -84,7 +84,7 @@ func TestNewListingEvent(t *testing.T) {
 	s := env.GetListing()
 	if s.GetId() != l.ID.String() || s.GetKind() != domain.KindOffer || s.GetOwnerId() != l.OwnerID.String() ||
 		s.GetProduct() != commonv1.ProductType_PRODUCT_TYPE_KARTOSHKA || s.GetQuantity().GetGrams() != 20_000_000 ||
-		s.GetQuantity().GetDisplayUnit() != domain.UnitTonne || s.GetRemainingQuantity().GetGrams() != 20_000_000 ||
+		s.GetQuantity().GetDisplayUnit() != domain.UnitTonne ||
 		s.GetPrice().GetAmount().GetAmountMinor() != 450_000 || s.GetPrice().GetAmount().GetCurrencyCode() != "UZS" ||
 		s.GetPrice().GetUnit() != domain.UnitKilogram || s.GetAddress().GetDistrict() != "Urgut" ||
 		s.GetAddress().GetLocation().GetLatitude() != 39.4 || s.GetNotes() != l.Notes || len(s.GetMedia()) != 2 ||

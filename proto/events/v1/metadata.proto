@@ -19,7 +19,6 @@ import "google/protobuf/timestamp.proto";
 //   agrogram.identity.account.v1          user_id          AccountEvent (account.proto)
 //   agrogram.profilesocial.profile.v1     user_id          ProfileEvent (profile.proto)
 //   agrogram.catalog.listing.v1           listing_id       ListingEvent (listing.proto)
-//   agrogram.orderescrow.transaction.v1   transaction_id   TransactionEvent (transaction.proto)
 //   agrogram.mediapipeline.media.v1       media_id         MediaEvent (media.proto)
 //   agrogram.notification.request.v1      recipient_id     NotificationRequestEvent (notification.proto)
 //   agrogram.<consumer>.deadletter.v1     original key     DeadLetter (this file)
@@ -35,8 +34,8 @@ import "google/protobuf/timestamp.proto";
 //
 // The snapshot sits in the envelope rather than in each event, so every event
 // of a stream carries the aggregate's full state after it (event-carried state
-// transfer). A consumer that only keeps a projection (listing cards, analytics
-// facts) can upsert from ANY event, including event types added after it was
+// transfer). A consumer that only keeps a projection (listing cards, account
+// roles) can upsert from ANY event, including event types added after it was
 // built, and reads the oneof only for step-specific details. The notification
 // request stream has no aggregate state and therefore no snapshot.
 //
@@ -82,11 +81,11 @@ message EventMetadata {
   // publish time.
   google.protobuf.Timestamp occurred_at = 3 [(buf.validate.field).required = true];
 
-  // Service that produced the event, e.g. "order-escrow".
+  // Service that produced the event, e.g. "catalog".
   string producer = 4 [(buf.validate.field).string.pattern = "^[a-z][a-z0-9-]{1,62}$"];
 
   // Kind of aggregate the stream is about: USER (account, profile,
-  // notification requests), LISTING, TRANSACTION or MEDIA.
+  // notification requests), LISTING or MEDIA.
   common.v1.ResourceType aggregate_type = 5 [
     (buf.validate.field).required = true,
     (buf.validate.field).enum.defined_only = true
@@ -107,8 +106,9 @@ message EventMetadata {
     max_len: 128
   }];
 
-  // `event_id` of the event that caused this one, e.g. the ListingClosed that
-  // made order-escrow cancel a transaction. Empty when a command caused it.
+  // `event_id` of the event that caused this one, e.g. the ListingCreated
+  // that made notification tell the owner's followers. Empty when a command
+  // caused it.
   string causation_id = 9 [
     (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
     (buf.validate.field).string.uuid = true

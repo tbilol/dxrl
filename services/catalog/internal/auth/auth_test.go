@@ -76,7 +76,7 @@ func TestFromMetadataRejectsBadUserID(t *testing.T) {
 }
 
 func TestStaffAndRequireUser(t *testing.T) {
-	admin := Principal{UserID: uuid.New(), Roles: []commonv1.Role{commonv1.Role_ROLE_RESELLER, commonv1.Role_ROLE_ADMIN}}
+	admin := Principal{UserID: uuid.New(), Roles: []commonv1.Role{commonv1.Role_ROLE_ADMIN}}
 	if !admin.Staff() {
 		t.Fatal("ROLE_ADMIN is staff")
 	}

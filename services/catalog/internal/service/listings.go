@@ -28,7 +28,7 @@ import (
 // per-owner advisory lock: a retry with the same request id returns the
 // listing it created, the product must be in the reference data and not
 // retired, and the owner's ACTIVE listings of kind must be below the flat
-// per-board quota (PLAN_LIMIT_REACHED). Only ACTIVE listings count: CLOSED,
+// per-board quota (LISTING_LIMIT_REACHED). Only ACTIVE listings count: CLOSED,
 // BLOCKED and DELETED ones are off the board, so they do not hold a slot.
 func (s *Service) CreateListing(ctx context.Context, p auth.Principal, requestID string, kind commonv1.ListingKind,
 	f domain.ListingFields,
@@ -77,7 +77,7 @@ func (s *Service) CreateListing(ctx context.Context, p auth.Principal, requestID
 			return err
 		}
 		if n >= limit {
-			return apperr.New(commonv1.ErrorReason_ERROR_REASON_PLAN_LIMIT_REACHED,
+			return apperr.New(commonv1.ErrorReason_ERROR_REASON_LISTING_LIMIT_REACHED,
 				fmt.Sprintf("at most %d active %s listings per user", limit, kindName(kind)),
 				"listing_kind", kindName(kind), "limit", strconv.Itoa(limit))
 		}

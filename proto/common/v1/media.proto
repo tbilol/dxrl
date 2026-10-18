@@ -16,18 +16,18 @@ enum MediaType {
 // MediaPurpose says what an upload is for. It selects the media-pipeline
 // processing job, size limits and who may read the result.
 enum MediaPurpose {
+  // WEIGHBRIDGE_RECEIPT (4) was the escrow receipt photo; escrow is gone.
+  reserved 4;
+  reserved "MEDIA_PURPOSE_WEIGHBRIDGE_RECEIPT";
+
   MEDIA_PURPOSE_UNSPECIFIED = 0;
   // Photo on a catalog listing. Public.
   MEDIA_PURPOSE_LISTING_IMAGE = 1;
-  // Short video on a catalog listing. Premium only. Transcoded for streaming,
-  // with a poster frame. Public.
+  // Short video on a catalog listing. Free for everyone. Transcoded for
+  // streaming, with a poster frame. Public.
   MEDIA_PURPOSE_LISTING_VIDEO = 2;
   // Profile picture. Public.
   MEDIA_PURPOSE_AVATAR = 3;
-  // Photo of the weighbridge ticket (tarozi cheki) submitted in the escrow
-  // `receipt` step. OCR'd for weight and ticket number. Private to the
-  // transaction parties and staff.
-  MEDIA_PURPOSE_WEIGHBRIDGE_RECEIPT = 4;
 }
 
 // MediaStatus is where an upload is in the media pipeline.
@@ -44,7 +44,7 @@ enum MediaStatus {
 }
 
 // MediaRef attaches an uploaded media object to another resource (listing,
-// profile, transaction). In requests only `media_id` is read; the other
+// profile). In requests only `media_id` is read; the other
 // fields are output only and filled from media-pipeline results.
 message MediaRef {
   // Media object id (UUID) issued by media-pipeline.

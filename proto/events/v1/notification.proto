@@ -11,7 +11,7 @@ import "events/v1/metadata.proto";
 //
 //   Topic      agrogram.notification.request.v1
 //   Key        recipient_id
-//   Producers  any service (order-escrow, catalog, profile-social, identity, ...)
+//   Producers  any service (catalog, profile-social, identity, ...)
 //   Consumer   notification
 //
 // A service that wants a user notified publishes NotificationRequested.
@@ -22,14 +22,16 @@ import "events/v1/metadata.proto";
 // NotificationCategory groups notifications for preferences and inbox
 // filters. Shared by the notification API and this stream.
 enum NotificationCategory {
+  // TRANSACTION (1) covered the escrow transaction steps; escrow is gone.
+  reserved 1;
+  reserved "NOTIFICATION_CATEGORY_TRANSACTION";
+
   NOTIFICATION_CATEGORY_UNSPECIFIED = 0;
-  // Escrow transaction steps (payment held, receipt submitted, payout, ...).
-  NOTIFICATION_CATEGORY_TRANSACTION = 1;
   // Activity on the user's listings, or new listings from followed users.
   NOTIFICATION_CATEGORY_LISTING = 2;
-  // New followers and ratings.
+  // New followers.
   NOTIFICATION_CATEGORY_SOCIAL = 3;
-  // Farmer verification results, plan changes.
+  // Account changes.
   NOTIFICATION_CATEGORY_ACCOUNT = 4;
   // Sign-in codes, new sign-ins, password changes. Cannot be turned off.
   NOTIFICATION_CATEGORY_SECURITY = 5;

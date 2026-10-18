@@ -11,17 +11,18 @@ import "common/v1/pagination.proto";
 import "common/v1/product.proto";
 import "common/v1/quantity.proto";
 import "events/v1/listing.proto";
-import "events/v1/profile.proto";
 import "google/protobuf/field_mask.proto";
 import "google/protobuf/timestamp.proto";
 
-// ProfileSocialService owns public profiles, follows and ratings, and serves
-// each user's own listings.
+// ProfileSocialService owns public profiles and follows, and serves each
+// user's own listings.
 //
-// A profile's id is its user id. The service publishes the profile stream
-// (agrogram.profilesocial.profile.v1) and consumes the listing stream (for
-// ListUserListings) and the transaction stream (deal counts; a completed
-// transaction unlocks ratings between its two parties).
+// A profile's id is its user id. The service consumes identity's account
+// stream and reads a user's listings from catalog (ListUserListings).
+//
+// Removed with the listings-only pivot (RPCs cannot be reserved; the names
+// must not be reused): RateUser and ListRatings, with their request /
+// response messages and Rating. There are no transactions to rate.
 service ProfileSocialService {
   // Creates the caller's profile, normally right after the first sign-in.
   // Errors: ALREADY_EXISTS.
@@ -34,7 +35,7 @@ service ProfileSocialService {
   rpc UpdateProfile(UpdateProfileRequest) returns (UpdateProfileResponse);
 
   // Deletes a profile. Soft delete: it disappears from lists and search, while
-  // ratings and transaction history stay.
+  // its fields stay.
   rpc DeleteProfile(DeleteProfileRequest) returns (DeleteProfileResponse);
 
   // Follows a user. Following someone already followed is a no-op.
@@ -50,14 +51,6 @@ service ProfileSocialService {
   // Lists the users a user follows, newest first.
   rpc ListFollowing(ListFollowingRequest) returns (ListFollowingResponse);
 
-  // Rates the other party of a completed transaction, once per transaction and
-  // rater. Publishes RatingUpdated for the rated user.
-  // Errors: RATING_NOT_ALLOWED, ALREADY_RATED.
-  rpc RateUser(RateUserRequest) returns (RateUserResponse);
-
-  // Lists the ratings a user received, newest first.
-  rpc ListRatings(ListRatingsRequest) returns (ListRatingsResponse);
-
   // Lists a user's listings on both boards, newest first. Other users see
   // ACTIVE listings only; the owner may ask for any status.
   rpc ListUserListings(ListUserListingsRequest) returns (ListUserListingsResponse);
@@ -65,6 +58,11 @@ service ProfileSocialService {
 
 // Profile is a user's public profile.
 message Profile {
+  // Rating, deals and badges: no transactions, one flat tier, no farmer
+  // verification.
+  reserved 7, 8, 11, 12;
+  reserved "rating", "deals_count", "is_verified_farmer", "is_premium";
+
   // Output only. User id (UUID).
   string id = 1 [
     (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE,
@@ -92,23 +90,11 @@ message Profile {
   // District or city within the region.
   string district = 6 [(buf.validate.field).string.max_len = 120];
 
-  // Output only. Aggregate rating.
-  agrogram.events.v1.RatingSummary rating = 7;
-
-  // Output only. Completed escrow transactions, as farmer or reseller.
-  int64 deals_count = 8;
-
   // Output only. Users following this user.
   int64 follower_count = 9;
 
   // Output only. Users this user follows.
   int64 following_count = 10;
-
-  // Output only. E-ijara-verified farmer, mirrored from identity.
-  bool is_verified_farmer = 11;
-
-  // Output only. Premium plan active (badge), mirrored from identity.
-  bool is_premium = 12;
 
   // Output only. The caller follows this user.
   bool is_followed_by_me = 13;
@@ -123,33 +109,13 @@ message Profile {
   google.protobuf.Timestamp updated_at = 16;
 }
 
-// Rating is one user's score for the other party of a completed transaction.
-message Rating {
-  // Rating id (UUID).
-  string id = 1;
-
-  // The rated transaction.
-  string transaction_id = 2;
-
-  // Who gave the rating.
-  string rater_id = 3;
-
-  // Who received it.
-  string rated_user_id = 4;
-
-  // Score, 1-5.
-  int32 score = 5;
-
-  // Optional comment.
-  string comment = 6;
-
-  // When the rating was given.
-  google.protobuf.Timestamp created_at = 7;
-}
-
 // ListingCard is the compact listing shown on a profile, projected from the
 // catalog listing stream.
 message ListingCard {
+  // The quantity not yet committed to transactions: no transactions any more.
+  reserved 5;
+  reserved "remaining_quantity";
+
   // Listing id (UUID); open it with catalog GetListing.
   string listing_id = 1;
 
@@ -161,9 +127,6 @@ message ListingCard {
 
   // Quantity posted.
   common.v1.Mass quantity = 4;
-
-  // Quantity not yet committed to transactions.
-  common.v1.Mass remaining_quantity = 5;
 
   // Price per kg or tonne. Unset = negotiable.
   common.v1.UnitPrice price = 6;
@@ -337,52 +300,6 @@ message ListFollowingResponse {
 
   // Next-page cursor.
   common.v1.PageResponse page = 2;
-}
-
-// RateUserRequest is the input of RateUser. The rated user is the caller's
-// counterparty in the transaction.
-message RateUserRequest {
-  // Idempotency key (UUID).
-  string request_id = 1 [(buf.validate.field).string.uuid = true];
-
-  // Completed transaction between the caller and the rated user.
-  string transaction_id = 2 [(buf.validate.field).string.uuid = true];
-
-  // Score, 1-5.
-  int32 score = 3 [(buf.validate.field).int32 = {
-    gte: 1
-    lte: 5
-  }];
-
-  // Optional comment.
-  string comment = 4 [(buf.validate.field).string.max_len = 500];
-}
-
-// RateUserResponse is the output of RateUser.
-message RateUserResponse {
-  // The stored rating.
-  Rating rating = 1;
-}
-
-// ListRatingsRequest is the input of ListRatings.
-message ListRatingsRequest {
-  // User whose received ratings to list.
-  string user_id = 1 [(buf.validate.field).string.uuid = true];
-
-  // Page to read.
-  common.v1.PageRequest page = 2;
-}
-
-// ListRatingsResponse is the output of ListRatings.
-message ListRatingsResponse {
-  // Ratings, newest first.
-  repeated Rating ratings = 1;
-
-  // The user's aggregate rating.
-  agrogram.events.v1.RatingSummary summary = 2;
-
-  // Next-page cursor.
-  common.v1.PageResponse page = 3;
 }
 
 // ListUserListingsRequest is the input of ListUserListings.

@@ -5,18 +5,15 @@ package agrogram.common.v1;
 // ListingKind tells which board a catalog listing belongs to.
 //
 // Both kinds share one listing model (product, quantity, price, phone,
-// address); the kind decides who may post it, which plan quota applies and
-// which party the listing owner becomes in an escrow transaction.
+// address). Any signed-in user may post on either board; buyer and seller
+// then contact each other directly (the listing's phone, later chat). Each
+// board has its own quota: 10 ACTIVE listings per user (one flat tier).
 enum ListingKind {
   LISTING_KIND_UNSPECIFIED = 0;
 
   // Sell offer on the farmers' board (dehqonlar doskasi, "taklif").
-  // Only e-ijara-verified farmers (ROLE_FARMER) may post. In a transaction the
-  // owner is the farmer (seller). Quota: Default 5, Premium 20.
   LISTING_KIND_OFFER = 1;
 
   // Buy-request on the resellers' board (olib sotuvchilar doskasi, "so'rov").
-  // Any account may post. In a transaction the owner is the reseller (buyer).
-  // Quota: Default 5, Premium 25.
   LISTING_KIND_BUY_REQUEST = 2;
 }

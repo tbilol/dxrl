@@ -139,7 +139,7 @@ var codeByReason = map[commonv1.ErrorReason]codes.Code{
 	commonv1.ErrorReason_ERROR_REASON_PROVIDER_ALREADY_LINKED:  codes.AlreadyExists,
 	commonv1.ErrorReason_ERROR_REASON_LAST_SIGN_IN_METHOD:      codes.FailedPrecondition,
 	commonv1.ErrorReason_ERROR_REASON_OTP_INVALID:              codes.InvalidArgument,
-	commonv1.ErrorReason_ERROR_REASON_PLAN_LIMIT_REACHED:       codes.ResourceExhausted,
+	commonv1.ErrorReason_ERROR_REASON_LISTING_LIMIT_REACHED:    codes.ResourceExhausted,
 	commonv1.ErrorReason_ERROR_REASON_LISTING_NOT_ACTIVE:       codes.FailedPrecondition,
 	commonv1.ErrorReason_ERROR_REASON_SELF_ACTION_NOT_ALLOWED:  codes.InvalidArgument,
 	commonv1.ErrorReason_ERROR_REASON_UNSUPPORTED_MEDIA_TYPE:   codes.InvalidArgument,

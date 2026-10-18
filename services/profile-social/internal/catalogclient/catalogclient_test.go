@@ -52,15 +52,14 @@ func TestListUserListingsForwardsTheCallerAndMapsCards(t *testing.T) {
 	photo := &commonv1.MediaRef{MediaId: uuid.NewString(), Type: commonv1.MediaType_MEDIA_TYPE_IMAGE}
 	listing := &catalogv1.Listing{
 		Id: uuid.NewString(), Kind: commonv1.ListingKind_LISTING_KIND_OFFER, OwnerId: owner.String(),
-		Product:           commonv1.ProductType_PRODUCT_TYPE_BUGDOY,
-		Quantity:          &commonv1.Mass{Grams: 5_000_000, DisplayUnit: commonv1.MassUnit_MASS_UNIT_TONNE},
-		RemainingQuantity: &commonv1.Mass{Grams: 3_000_000, DisplayUnit: commonv1.MassUnit_MASS_UNIT_TONNE},
-		Price:             &commonv1.UnitPrice{Amount: &commonv1.Money{AmountMinor: 450_000, CurrencyCode: "UZS"}, Unit: commonv1.MassUnit_MASS_UNIT_KILOGRAM},
-		Phone:             "+998901234567",
-		Address:           &commonv1.Address{Region: commonv1.Region_REGION_JIZZAX, District: "Zomin"},
-		Media:             []*commonv1.MediaRef{video, photo},
-		Status:            eventsv1.ListingStatus_LISTING_STATUS_ACTIVE,
-		CreatedAt:         timestamppb.New(created),
+		Product:   commonv1.ProductType_PRODUCT_TYPE_BUGDOY,
+		Quantity:  &commonv1.Mass{Grams: 5_000_000, DisplayUnit: commonv1.MassUnit_MASS_UNIT_TONNE},
+		Price:     &commonv1.UnitPrice{Amount: &commonv1.Money{AmountMinor: 450_000, CurrencyCode: "UZS"}, Unit: commonv1.MassUnit_MASS_UNIT_KILOGRAM},
+		Phone:     "+998901234567",
+		Address:   &commonv1.Address{Region: commonv1.Region_REGION_JIZZAX, District: "Zomin"},
+		Media:     []*commonv1.MediaRef{video, photo},
+		Status:    eventsv1.ListingStatus_LISTING_STATUS_ACTIVE,
+		CreatedAt: timestamppb.New(created),
 	}
 	stub := &stubCatalog{resp: &catalogv1.ListListingsResponse{
 		Listings: []*catalogv1.Listing{listing, {Id: uuid.NewString(), Media: []*commonv1.MediaRef{video}}},
@@ -100,7 +99,7 @@ func TestListUserListingsForwardsTheCallerAndMapsCards(t *testing.T) {
 	}
 	c := page.Listings[0]
 	if c.GetListingId() != listing.GetId() || c.GetKind() != listing.GetKind() || c.GetProduct() != listing.GetProduct() ||
-		c.GetQuantity().GetGrams() != 5_000_000 || c.GetRemainingQuantity().GetGrams() != 3_000_000 ||
+		c.GetQuantity().GetGrams() != 5_000_000 ||
 		c.GetPrice().GetAmount().GetAmountMinor() != 450_000 || c.GetRegion() != commonv1.Region_REGION_JIZZAX ||
 		c.GetDistrict() != "Zomin" || c.GetStatus() != eventsv1.ListingStatus_LISTING_STATUS_ACTIVE ||
 		!c.GetCreatedAt().AsTime().Equal(created) || c.GetCover() != photo {

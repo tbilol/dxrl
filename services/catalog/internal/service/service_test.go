@@ -185,7 +185,7 @@ func TestCreateListingQuotas(t *testing.T) {
 				e.create(t, p, kind)
 			}
 			_, err := e.svc.CreateListing(ctx, p, uuid.NewString(), kind, fields())
-			ae := wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_PLAN_LIMIT_REACHED)
+			ae := wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_LISTING_LIMIT_REACHED)
 			if ae.Code != codes.ResourceExhausted ||
 				ae.Metadata["listing_kind"] != strings.TrimPrefix(kind.String(), "LISTING_KIND_") ||
 				ae.Metadata["limit"] != strconv.Itoa(domain.DefaultListingQuota) || len(ae.Metadata) != 2 {
@@ -210,7 +210,7 @@ func TestQuotasArePerKindAndCountOnlyActive(t *testing.T) {
 	}
 	for _, kind := range []commonv1.ListingKind{domain.KindOffer, domain.KindBuyRequest} {
 		_, err := e.svc.CreateListing(ctx, p, uuid.NewString(), kind, fields())
-		wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_PLAN_LIMIT_REACHED)
+		wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_LISTING_LIMIT_REACHED)
 	}
 	// Another owner is not affected.
 	e.create(t, member(), domain.KindOffer)
@@ -225,7 +225,7 @@ func TestQuotasArePerKindAndCountOnlyActive(t *testing.T) {
 		e.create(t, p, domain.KindOffer)
 	}
 	_, err := e.svc.CreateListing(ctx, p, uuid.NewString(), domain.KindOffer, fields())
-	wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_PLAN_LIMIT_REACHED)
+	wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_LISTING_LIMIT_REACHED)
 }
 
 func TestListingQuotaIsConfigurable(t *testing.T) {
@@ -233,7 +233,7 @@ func TestListingQuotaIsConfigurable(t *testing.T) {
 	p := member()
 	e.create(t, p, domain.KindOffer)
 	_, err := e.svc.CreateListing(ctx, p, uuid.NewString(), domain.KindOffer, fields())
-	if ae := wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_PLAN_LIMIT_REACHED); ae.Metadata["limit"] != "1" {
+	if ae := wantReason(t, err, commonv1.ErrorReason_ERROR_REASON_LISTING_LIMIT_REACHED); ae.Metadata["limit"] != "1" {
 		t.Fatalf("metadata = %v", ae.Metadata)
 	}
 	e.create(t, p, domain.KindBuyRequest) // the other board has its own quota

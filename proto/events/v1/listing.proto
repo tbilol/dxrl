@@ -18,8 +18,8 @@ import "google/protobuf/timestamp.proto";
 //   Topic      agrogram.catalog.listing.v1
 //   Key        listing_id
 //   Producer   catalog
-//   Consumers  profile-social (a user's own listings), analytics (supply and
-//              demand statistics), notification (followers of the owner)
+//   Consumers  profile-social (a user's own listings, later), notification
+//              (followers of the owner, later)
 //
 // Events: ListingCreated. Later event types (for example ListingUpdated or
 // ListingClosed) are new `oneof` cases and do not break consumers.
@@ -27,16 +27,20 @@ import "google/protobuf/timestamp.proto";
 // ListingStatus is where a catalog listing is in its life cycle. Shared by the
 // catalog API and this stream.
 enum ListingStatus {
+  // SOLD_OUT (3) meant the whole quantity was committed to escrow
+  // transactions; there are none any more, and sold-out listings became
+  // CLOSED.
+  reserved 3;
+  reserved "LISTING_STATUS_SOLD_OUT";
+
   LISTING_STATUS_UNSPECIFIED = 0;
-  // On the board and open for new transactions.
+  // On the board.
   LISTING_STATUS_ACTIVE = 1;
-  // Closed by the owner: off the board; transactions already started continue.
+  // Closed by the owner: off the board.
   LISTING_STATUS_CLOSED = 2;
-  // The whole quantity is committed to escrow transactions.
-  LISTING_STATUS_SOLD_OUT = 3;
   // Hidden by staff moderation.
   LISTING_STATUS_BLOCKED = 4;
-  // Deleted by the owner. Soft delete: kept because transactions reference it.
+  // Deleted by the owner (soft delete).
   LISTING_STATUS_DELETED = 5;
 }
 
@@ -60,6 +64,10 @@ message ListingEvent {
 // ListingSnapshot is the public state of a listing: what a listing card shows,
 // minus the contact phone, which is never published.
 message ListingSnapshot {
+  // The quantity not yet committed to escrow transactions: no escrow any more.
+  reserved 6;
+  reserved "remaining_quantity";
+
   // Listing id (UUID). Equals the record key.
   string id = 1 [(buf.validate.field).string.uuid = true];
 
@@ -69,7 +77,7 @@ message ListingSnapshot {
     (buf.validate.field).enum.defined_only = true
   ];
 
-  // Account that posted it: the farmer of an offer, the reseller of a buy-request.
+  // Account that posted it: the seller of an offer, the buyer of a buy-request.
   string owner_id = 3 [(buf.validate.field).string.uuid = true];
 
   // Product.
@@ -80,9 +88,6 @@ message ListingSnapshot {
 
   // Quantity posted.
   common.v1.Mass quantity = 5 [(buf.validate.field).required = true];
-
-  // Quantity not yet committed to escrow transactions.
-  common.v1.Mass remaining_quantity = 6 [(buf.validate.field).required = true];
 
   // Asking price (offer) or offered price (buy-request). Unset = negotiable.
   common.v1.UnitPrice price = 7;
@@ -112,7 +117,6 @@ message ListingSnapshot {
   google.protobuf.Timestamp updated_at = 14 [(buf.validate.field).required = true];
 }
 
-// ListingCreated: a farmer posted a sell offer or a reseller posted a
-// buy-request. The listing is the envelope snapshot (status ACTIVE); there are
+// ListingCreated: a user posted a sell offer or a buy-request. The listing is the envelope snapshot (status ACTIVE); there are
 // no creation-only details.
 message ListingCreated {}

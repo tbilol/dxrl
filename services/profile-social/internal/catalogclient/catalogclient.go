@@ -110,16 +110,15 @@ func (c *Client) ListUserListings(ctx context.Context, p auth.Principal, q domai
 // poster) when there is no photo.
 func Card(l *catalogv1.Listing) *profilesocialv1.ListingCard {
 	card := &profilesocialv1.ListingCard{
-		ListingId:         l.GetId(),
-		Kind:              l.GetKind(),
-		Product:           l.GetProduct(),
-		Quantity:          l.GetQuantity(),
-		RemainingQuantity: l.GetRemainingQuantity(),
-		Price:             l.GetPrice(),
-		Region:            l.GetAddress().GetRegion(),
-		District:          l.GetAddress().GetDistrict(),
-		Status:            l.GetStatus(),
-		CreatedAt:         l.GetCreatedAt(),
+		ListingId: l.GetId(),
+		Kind:      l.GetKind(),
+		Product:   l.GetProduct(),
+		Quantity:  l.GetQuantity(),
+		Price:     l.GetPrice(),
+		Region:    l.GetAddress().GetRegion(),
+		District:  l.GetAddress().GetDistrict(),
+		Status:    l.GetStatus(),
+		CreatedAt: l.GetCreatedAt(),
 	}
 	for _, m := range l.GetMedia() {
 		if m.GetType() == commonv1.MediaType_MEDIA_TYPE_IMAGE {

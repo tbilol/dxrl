@@ -13,9 +13,7 @@ import "buf/validate/validate.proto";
 //
 //   x-agrogram-user-id     UUID of the signed-in user. Absent => anonymous call.
 //   x-agrogram-roles       Comma-separated Role names without "ROLE_",
-//                          e.g. "RESELLER,FARMER". Order is not significant.
-//   x-agrogram-premium     "true" | "false": Premium plan active when the
-//                          access token was issued.
+//                          e.g. "ADMIN". Absent when the user holds none.
 //   x-agrogram-session-id  UUID of the sign-in session (refresh-token family).
 //
 // Always-present request context (set by the edge, propagated by everyone):
@@ -27,30 +25,27 @@ import "buf/validate/validate.proto";
 //
 // Service-to-service:
 //
-//   x-agrogram-caller      Name of the calling service, e.g. "order-escrow".
+//   x-agrogram-caller      Name of the calling service, e.g. "profile-social".
 //                          Set on every outgoing internal call.
 //
 // Rules: services read identity ONLY from these headers (never from request
 // bodies); they forward the user headers unchanged on calls made on the user's
-// behalf; roles and premium are a token-time snapshot (access tokens are
-// short-lived), so services that need the live value ask identity.
+// behalf; roles are a token-time snapshot (access tokens are short-lived), so
+// services that need the live value ask identity.
 // Principal is the in-process form of these headers.
 
-// Role is an authorization role. An account holds a SET of roles: the same
-// person can sell as a farmer and buy as a reseller, and both plan quotas apply.
+// Role is an authorization role. An account holds a set of roles, usually
+// none: any signed-in user may post on either board (the board is the
+// listing's kind, not a role), so roles are for staff only.
 enum Role {
+  // RESELLER (1) and FARMER (2) gated the two boards; the listings-only
+  // platform has no seller check, so they are gone.
+  reserved 1, 2;
+  reserved "ROLE_RESELLER", "ROLE_FARMER";
+
   ROLE_UNSPECIFIED = 0;
 
-  // Olib sotuvchi / sotib oluvchi (reseller, buyer). Granted to every active
-  // account at sign-up: may post buy-requests, start transactions on offers
-  // and pay into escrow.
-  ROLE_RESELLER = 1;
-
-  // Dehqon (farmer). Granted by identity once the e-ijara land-lease contract
-  // is verified: may post sell offers and receive escrow payouts.
-  ROLE_FARMER = 2;
-
-  // Platform staff: moderation, disputes, manual escrow operations.
+  // Platform staff: moderation.
   ROLE_ADMIN = 3;
 }
 
@@ -61,18 +56,19 @@ message Principal {
   // every other service.
   string user_id = 1 [(buf.validate.field).string.uuid = true];
 
+  // Premium plan flag: one flat tier now.
+  reserved 3;
+  reserved "is_premium";
+
   // Roles held when the access token was issued.
   repeated Role roles = 2 [(buf.validate.field).repeated.items.enum.defined_only = true];
-
-  // Premium plan active when the access token was issued.
-  bool is_premium = 3;
 
   // Sign-in session id (UUID).
   string session_id = 4 [(buf.validate.field).string.uuid = true];
 }
 
 // Actor records who performed an action: a user, or a backend service acting
-// on its own (e.g. order-escrow releasing a payout). Used in events and audit
+// on its own (e.g. catalog relaying its outbox). Used in events and audit
 // trails.
 message Actor {
   // Exactly one kind of actor.
@@ -82,7 +78,7 @@ message Actor {
     // A user acting through the app (UUID).
     string user_id = 1 [(buf.validate.field).string.uuid = true];
 
-    // A backend service acting on its own, by service name, e.g. "order-escrow".
+    // A backend service acting on its own, by service name, e.g. "catalog".
     string service = 2 [(buf.validate.field).string.pattern = "^[a-z][a-z0-9-]{1,62}$"];
   }
 }

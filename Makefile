@@ -18,7 +18,7 @@ DOCKER    ?= docker
 
 # Git ref the breaking-change check compares against. Needs the contracts to be
 # committed on that branch first.
-BREAKING_AGAINST ?= .git\#branch=main
+BREAKING_AGAINST ?= .git\#branch=master
 
 # Run as the host user so generated files are not root-owned; keep buf's module
 # and plugin cache inside the repo (git-ignored) so it survives between runs.
