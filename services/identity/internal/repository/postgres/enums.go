@@ -44,27 +44,11 @@ func (m enumMap[E]) value(s string) (E, error) {
 
 var (
 	roles = newEnumMap("role", map[commonv1.Role]string{
-		domain.RoleReseller: "RESELLER",
-		domain.RoleFarmer:   "FARMER",
-		domain.RoleAdmin:    "ADMIN",
+		domain.RoleAdmin: "ADMIN",
 	})
 	accountStatuses = newEnumMap("account status", map[identityv1.AccountStatus]string{
 		domain.AccountActive:  "ACTIVE",
 		domain.AccountBlocked: "BLOCKED",
 		domain.AccountDeleted: "DELETED",
-	})
-	plans = newEnumMap("plan", map[identityv1.Plan]string{
-		domain.PlanDefault: "DEFAULT",
-		domain.PlanPremium: "PREMIUM",
-	})
-	verificationStatuses = newEnumMap("verification status", map[identityv1.FarmerVerificationStatus]string{
-		domain.VerificationPending:  "PENDING",
-		domain.VerificationVerified: "VERIFIED",
-		domain.VerificationRejected: "REJECTED",
-		domain.VerificationExpired:  "EXPIRED",
-	})
-	rejectionReasons = newEnumMap("rejection reason", map[commonv1.ErrorReason]string{
-		domain.ReasonContractInvalid: "LEASE_CONTRACT_INVALID",
-		domain.ReasonContractClaimed: "LEASE_CONTRACT_ALREADY_CLAIMED",
 	})
 )

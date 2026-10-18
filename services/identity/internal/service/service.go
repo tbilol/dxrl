@@ -1,5 +1,6 @@
-// Package service is identity's business logic: accounts, authorization, the
-// e-ijara farmer verification flow and its background worker.
+// Package service is identity's business logic: accounts and authorization.
+// AGROGRAM has one flat tier and no seller verification, so identity keeps
+// no plan and verifies nobody; ADMIN (staff) is the only role.
 package service
 
 import (
@@ -9,11 +10,11 @@ import (
 
 	"github.com/google/uuid"
 	commonv1 "github.com/tbilol/dxrl/gen/go/common/v1"
-	identityv1 "github.com/tbilol/dxrl/gen/go/identity/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/tbilol/dxrl/services/identity/internal/apperr"
+	"github.com/tbilol/dxrl/services/identity/internal/auth"
 	"github.com/tbilol/dxrl/services/identity/internal/domain"
-	"github.com/tbilol/dxrl/services/identity/internal/eijara"
 	"github.com/tbilol/dxrl/services/identity/internal/events"
 )
 
@@ -24,41 +25,6 @@ type Queries interface {
 	// request id exists; it returns the stored account and whether it is new.
 	CreateAccount(ctx context.Context, a domain.Account, requestID uuid.UUID) (domain.Account, bool, error)
 	GetAccount(ctx context.Context, id uuid.UUID) (domain.Account, error)
-	// LockAccount takes the account's row lock for the rest of the
-	// transaction; role changes are serialized per account through it.
-	LockAccount(ctx context.Context, id uuid.UUID) error
-	// GrantRole adds a role and bumps the account version; false if held.
-	GrantRole(ctx context.Context, id uuid.UUID, role commonv1.Role, now time.Time) (bool, error)
-	// RevokeFarmerRoleUnlessVerified removes ROLE_FARMER (bumping the
-	// version) unless a VERIFIED verification remains; false if unchanged.
-	RevokeFarmerRoleUnlessVerified(ctx context.Context, id uuid.UUID, now time.Time) (bool, error)
-	// SetPlan sets the plan with no Premium end date (premium_until cleared)
-	// and bumps the version; domain.ErrNotFound if the account is missing.
-	SetPlan(ctx context.Context, id uuid.UUID, plan identityv1.Plan, now time.Time) error
-
-	GetVerification(ctx context.Context, id uuid.UUID) (domain.Verification, error)
-	VerificationByRequest(ctx context.Context, userID, requestID uuid.UUID) (domain.Verification, error)
-	LatestVerification(ctx context.Context, userID uuid.UUID) (domain.Verification, error)
-	// ContractClaimed reports whether another user's VERIFIED verification
-	// holds the contract number.
-	ContractClaimed(ctx context.Context, contractNumber string, userID uuid.UUID) (bool, error)
-	// InsertVerification stores a PENDING verification unless (user_id,
-	// request_id) exists; it returns the stored row and whether it is new.
-	InsertVerification(ctx context.Context, v domain.Verification) (domain.Verification, bool, error)
-	// DecideVerification applies d if the verification is still PENDING and
-	// reports whether it did. It returns domain.ErrContractClaimed when the
-	// contract already has a VERIFIED verification.
-	DecideVerification(ctx context.Context, d domain.Decision) (bool, error)
-	// ClaimPendingVerifications picks PENDING verifications due at now
-	// (skipping rows other workers lock), counts an attempt and moves their
-	// next attempt out by min(backoff*2^attempts, maxBackoff).
-	ClaimPendingVerifications(ctx context.Context, now time.Time, limit int, backoff, maxBackoff time.Duration) ([]domain.Verification, error)
-	RecordVerificationError(ctx context.Context, id uuid.UUID, msg string) error
-	// ExpiryCandidates lists VERIFIED verifications whose lease ended before today.
-	ExpiryCandidates(ctx context.Context, today time.Time, limit int) ([]domain.Verification, error)
-	// ExpireVerification marks one of them EXPIRED if it still qualifies.
-	ExpireVerification(ctx context.Context, id uuid.UUID, today, now time.Time) (domain.Verification, bool, error)
-
 	EnqueueOutbox(ctx context.Context, m events.Message) error
 }
 
@@ -69,34 +35,11 @@ type Store interface {
 	InTx(ctx context.Context, fn func(Queries) error) error
 }
 
-// EIjaraChecker asks e-ijara about a lease contract number. It must honour
-// ctx: the service calls it with a short timeout.
-type EIjaraChecker interface {
-	Check(ctx context.Context, contractNumber string) (eijara.Result, error)
-}
-
-// RateLimiter counts a hit for key and says whether it is allowed.
-type RateLimiter interface {
-	Allow(ctx context.Context, key string) (allowed bool, retryAfter time.Duration, err error)
-}
-
-// Config tunes the verification flow and the worker.
-type Config struct {
-	EIjaraTimeout   time.Duration // inline e-ijara call
-	RetryBackoff    time.Duration // first background retry delay, doubled per attempt
-	RetryBackoffMax time.Duration
-	WorkerInterval  time.Duration
-	WorkerBatchSize int
-}
-
 // Service implements identity's use cases.
 type Service struct {
-	store   Store
-	checker EIjaraChecker
-	limiter RateLimiter // nil: rate limiting disabled
-	cfg     Config
-	now     func() time.Time
-	log     *slog.Logger
+	store Store
+	now   func() time.Time
+	log   *slog.Logger
 }
 
 // Option customizes a Service.
@@ -108,33 +51,15 @@ func WithClock(now func() time.Time) Option { return func(s *Service) { s.now = 
 // WithLogger sets the logger.
 func WithLogger(l *slog.Logger) Option { return func(s *Service) { s.log = l } }
 
-// New returns a Service. limiter may be nil (no rate limiting).
-func New(store Store, checker EIjaraChecker, limiter RateLimiter, cfg Config, opts ...Option) *Service {
+// New returns a Service.
+func New(store Store, opts ...Option) *Service {
 	s := &Service{
-		store:   store,
-		checker: checker,
-		limiter: limiter,
-		cfg:     cfg,
-		now:     time.Now,
-		log:     slog.New(slog.DiscardHandler),
+		store: store,
+		now:   time.Now,
+		log:   slog.New(slog.DiscardHandler),
 	}
 	for _, o := range opts {
 		o(s)
-	}
-	if s.cfg.EIjaraTimeout <= 0 {
-		s.cfg.EIjaraTimeout = 3 * time.Second
-	}
-	if s.cfg.RetryBackoff <= 0 {
-		s.cfg.RetryBackoff = 30 * time.Second
-	}
-	if s.cfg.RetryBackoffMax < s.cfg.RetryBackoff {
-		s.cfg.RetryBackoffMax = s.cfg.RetryBackoff
-	}
-	if s.cfg.WorkerInterval <= 0 {
-		s.cfg.WorkerInterval = 30 * time.Second
-	}
-	if s.cfg.WorkerBatchSize <= 0 {
-		s.cfg.WorkerBatchSize = 50
 	}
 	return s
 }
@@ -160,4 +85,47 @@ func parseID(field, s string) (uuid.UUID, error) {
 		})
 	}
 	return id, nil
+}
+
+// trigger is who caused a change, for the event metadata.
+type trigger struct {
+	actor         *commonv1.Actor
+	correlationID string
+	traceparent   string
+	tracestate    string
+}
+
+// requestTrigger is the caller of an RPC (see auth.Principal.Actor) with the
+// request's correlation id and trace context.
+func requestTrigger(p auth.Principal) trigger {
+	tr := trigger{actor: p.Actor(), correlationID: p.RequestID, traceparent: p.Traceparent, tracestate: p.Tracestate}
+	if tr.correlationID == "" { // only direct callers skip the interceptor's fallback
+		id, err := newID()
+		if err != nil {
+			id = uuid.New()
+		}
+		tr.correlationID = id.String()
+	}
+	return tr
+}
+
+// enqueueAccountEvent writes one AccountEvent to the outbox through q, so it
+// commits or rolls back with the state change. acct is the account right
+// after the event (the snapshot).
+func (s *Service) enqueueAccountEvent(ctx context.Context, q Queries, acct domain.Account, event proto.Message,
+	at time.Time, tr trigger,
+) error {
+	msg, err := events.NewAccountEvent(events.AccountChange{
+		Account:       acct,
+		Event:         event,
+		OccurredAt:    at,
+		CorrelationID: tr.correlationID,
+		Traceparent:   tr.traceparent,
+		Tracestate:    tr.tracestate,
+		Actor:         tr.actor,
+	})
+	if err != nil {
+		return err
+	}
+	return q.EnqueueOutbox(ctx, msg)
 }

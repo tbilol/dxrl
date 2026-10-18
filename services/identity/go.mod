@@ -6,13 +6,11 @@ toolchain go1.27.1
 
 require (
 	buf.build/go/protovalidate v1.4.0
-	github.com/alicebob/miniredis/v2 v2.39.0
 	github.com/caarlos0/env/v11 v11.4.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/pashagolub/pgxmock/v5 v5.2.0
 	github.com/pressly/goose/v3 v3.28.0
-	github.com/redis/go-redis/v9 v9.22.0
 	github.com/tbilol/dxrl/gen/go v0.0.0-00010101000000-000000000000
 	github.com/twmb/franz-go v1.22.0
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20260918165059-79db0ce448c6
@@ -25,7 +23,6 @@ require (
 	cel.dev/cel-go v0.32.0 // indirect
 	cel.dev/expr v0.25.3 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
-	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
@@ -34,8 +31,6 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.30 // indirect
 	github.com/sethvargo/go-retry v0.4.0 // indirect
 	github.com/twmb/franz-go/pkg/kmsg v1.14.0 // indirect
-	github.com/yuin/gopher-lua v1.1.1 // indirect
-	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/exp v0.0.0-20260824195058-e88cd73687aa // indirect

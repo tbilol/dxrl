@@ -15,24 +15,21 @@ import (
 
 	"buf.build/go/protovalidate"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kgo"
 	grpchealth "google.golang.org/grpc/health"
 
 	"github.com/tbilol/dxrl/services/identity/internal/config"
-	"github.com/tbilol/dxrl/services/identity/internal/eijara"
 	"github.com/tbilol/dxrl/services/identity/internal/events"
 	"github.com/tbilol/dxrl/services/identity/internal/grpcserver"
 	"github.com/tbilol/dxrl/services/identity/internal/health"
 	applog "github.com/tbilol/dxrl/services/identity/internal/log"
-	"github.com/tbilol/dxrl/services/identity/internal/ratelimit"
 	"github.com/tbilol/dxrl/services/identity/internal/repository/postgres"
 	"github.com/tbilol/dxrl/services/identity/internal/service"
 )
 
 // serve runs identity until SIGINT/SIGTERM, then shuts down gracefully:
-// health NOT_SERVING, drain gRPC, stop HTTP, stop the worker and the relay,
-// flush the Kafka producer, close Redis and the Postgres pool.
+// health NOT_SERVING, drain gRPC, stop HTTP, stop the relay, flush the Kafka
+// producer and close the Postgres pool.
 func serve(ctx context.Context) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -59,23 +56,6 @@ func serve(ctx context.Context) error {
 	defer pool.Close()
 	store := postgres.New(pool)
 
-	// Redis (optional): the farmer verification rate limit.
-	var (
-		rdb     *redis.Client
-		limiter service.RateLimiter
-	)
-	if cfg.RedisURL != "" {
-		opt, err := redis.ParseURL(cfg.RedisURL)
-		if err != nil {
-			return fmt.Errorf("IDENTITY_REDIS_URL: %w", err)
-		}
-		rdb = redis.NewClient(opt)
-		defer rdb.Close()
-		limiter = ratelimit.New(rdb, cfg.VerificationRateLimit, cfg.VerificationRateWindow)
-	} else {
-		log.Warn("IDENTITY_REDIS_URL is empty: farmer verification rate limiting is disabled")
-	}
-
 	// Kafka (optional): the outbox relay.
 	var kafka *kgo.Client
 	if len(cfg.KafkaBrokers) > 0 {
@@ -91,15 +71,7 @@ func serve(ctx context.Context) error {
 		log.Warn("IDENTITY_KAFKA_BROKERS is empty: outbox relay disabled, events stay in the outbox table")
 	}
 
-	// STUB: e-ijara does not exist yet; eijara.Stub answers locally.
-	checker := eijara.Stub{Delay: cfg.EIjaraStubDelay}
-	svc := service.New(store, checker, limiter, service.Config{
-		EIjaraTimeout:   cfg.EIjaraTimeout,
-		RetryBackoff:    cfg.RetryBackoff,
-		RetryBackoffMax: cfg.RetryBackoffMax,
-		WorkerInterval:  cfg.WorkerInterval,
-		WorkerBatchSize: cfg.WorkerBatchSize,
-	}, service.WithLogger(log))
+	svc := service.New(store, service.WithLogger(log))
 
 	validator, err := protovalidate.New()
 	if err != nil {
@@ -130,7 +102,6 @@ func serve(ctx context.Context) error {
 	defer stopBG()
 	var bg sync.WaitGroup
 	bg.Go(func() { monitor.Run(bgCtx) })
-	bg.Go(func() { svc.RunWorker(bgCtx) })
 	if kafka != nil {
 		relay := events.NewRelay(store, kafka, events.RelayConfig{
 			Interval:   cfg.OutboxInterval,
@@ -149,7 +120,7 @@ func serve(ctx context.Context) error {
 		}
 	}()
 	log.Info("identity started", "grpc_addr", grpcLis.Addr().String(), "http_addr", httpLis.Addr().String(),
-		"grpc_reflection", cfg.GRPCReflection, "rate_limit", limiter != nil, "outbox_relay", kafka != nil)
+		"grpc_reflection", cfg.GRPCReflection, "outbox_relay", kafka != nil)
 
 	var runErr error
 	select {

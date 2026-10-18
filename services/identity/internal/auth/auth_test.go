@@ -18,8 +18,7 @@ func TestFromMetadata(t *testing.T) {
 	user, session := uuid.New(), uuid.New()
 	p, err := FromMetadata(metadata.New(map[string]string{
 		HeaderUserID:      user.String(),
-		HeaderRoles:       " reseller, FARMER ,bogus,,FARMER",
-		HeaderPremium:     "TRUE",
+		HeaderRoles:       " admin, ADMIN ,bogus,,ADMIN",
 		HeaderSessionID:   session.String(),
 		HeaderCaller:      "auth-gateway",
 		HeaderRequestID:   "req-123",
@@ -30,16 +29,16 @@ func TestFromMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Principal{
-		UserID: user, Roles: []commonv1.Role{commonv1.Role_ROLE_RESELLER, commonv1.Role_ROLE_FARMER},
-		Premium: true, SessionID: session.String(), Caller: "auth-gateway", RequestID: "req-123",
+		UserID: user, Roles: []commonv1.Role{commonv1.Role_ROLE_ADMIN},
+		SessionID: session.String(), Caller: "auth-gateway", RequestID: "req-123",
 		Traceparent: traceparent, Tracestate: "vendor=1",
 	}
-	if p.UserID != want.UserID || !slices.Equal(p.Roles, want.Roles) || p.Premium != want.Premium ||
+	if p.UserID != want.UserID || !slices.Equal(p.Roles, want.Roles) ||
 		p.SessionID != want.SessionID || p.Caller != want.Caller || p.RequestID != want.RequestID ||
 		p.Traceparent != want.Traceparent || p.Tracestate != want.Tracestate {
 		t.Fatalf("got %+v\nwant %+v", p, want)
 	}
-	if !p.Authenticated() || !p.Internal() || !p.HasRole(commonv1.Role_ROLE_FARMER) || p.HasRole(commonv1.Role_ROLE_ADMIN) {
+	if !p.Authenticated() || !p.Internal() || !p.HasRole(commonv1.Role_ROLE_ADMIN) {
 		t.Fatalf("helpers disagree: %+v", p)
 	}
 	if p.Actor().GetUserId() != user.String() {
@@ -58,7 +57,7 @@ func TestFromMetadataAnonymousAndSanitized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Authenticated() || p.Internal() || p.Traceparent != "" || p.Tracestate != "" || p.SessionID != "" || p.Premium {
+	if p.Authenticated() || p.Internal() || p.Traceparent != "" || p.Tracestate != "" || p.SessionID != "" {
 		t.Fatalf("got %+v", p)
 	}
 	if uuid.Validate(p.RequestID) != nil {
@@ -78,8 +77,8 @@ func TestActor(t *testing.T) {
 		wantService string
 	}{
 		{"signed-in user", Principal{UserID: user}, user.String(), ""},
-		{"user headers forwarded by a service", Principal{UserID: user, Caller: CallerOrderEscrow}, user.String(), ""},
-		{"service acting on its own", Principal{Caller: CallerOrderEscrow}, "", CallerOrderEscrow},
+		{"user headers forwarded by a service", Principal{UserID: user, Caller: CallerAuthGateway}, user.String(), ""},
+		{"service acting on its own", Principal{Caller: CallerAuthGateway}, "", CallerAuthGateway},
 		{"neither", Principal{}, "", ServiceName},
 	}
 	for _, tt := range tests {
@@ -108,7 +107,7 @@ func TestAuthorizationRules(t *testing.T) {
 	self, other := uuid.New(), uuid.New()
 	user := Principal{UserID: self}
 	admin := Principal{UserID: self, Roles: []commonv1.Role{commonv1.Role_ROLE_ADMIN}}
-	internal := Principal{Caller: "order-escrow"}
+	internal := Principal{Caller: "catalog"}
 	adminWithoutUser := Principal{Roles: []commonv1.Role{commonv1.Role_ROLE_ADMIN}}
 
 	tests := []struct {
@@ -148,14 +147,6 @@ func TestAuthorizationRules(t *testing.T) {
 	for _, p := range []Principal{user, admin, internal} {
 		if ae := apperr.From(RequireCaller(p, CallerAuthGateway)); ae == nil || ae.Code != codes.PermissionDenied {
 			t.Fatalf("RequireCaller(%+v) = %v", p, ae)
-		}
-	}
-	if err := RequireCaller(internal, CallerOrderEscrow); err != nil { // internal is order-escrow
-		t.Fatal(err)
-	}
-	for _, p := range []Principal{user, admin, {Caller: CallerAuthGateway}} {
-		if ae := apperr.From(RequireCaller(p, CallerOrderEscrow)); ae == nil || ae.Code != codes.PermissionDenied {
-			t.Fatalf("RequireCaller(%+v, order-escrow) = %v", p, ae)
 		}
 	}
 }

@@ -1,7 +1,8 @@
 # identity on top of the local infrastructure stack.
 #
 # Always used together with back/deploy/docker-compose.yml, which defines
-# postgres, redis, kafka, kafka-init and the `agrogram` network. From the
+# postgres, kafka, kafka-init and the `agrogram` network (identity uses no
+# Redis). From the
 # directory that contains back/:
 #
 #   docker compose -f back/deploy/docker-compose.yml -f back/services/identity/compose.yaml \
@@ -10,8 +11,8 @@
 # (or `make compose-up` in back/services/identity). With several -f files,
 # Compose resolves relative paths against the FIRST file's directory
 # (back/deploy/) and reads back/deploy/.env for interpolation; hence the build
-# context `..` (= back/) and the passwords from IDENTITY_DB_PASSWORD and
-# REDIS_PASSWORD, which that .env already defines.
+# context `..` (= back/) and the password from IDENTITY_DB_PASSWORD, which
+# that .env already defines.
 #
 # Needs `make gen` in back/services/identity beforehand (the image compiles
 # against back/gen/go).
@@ -25,7 +26,6 @@ x-identity-image: &identity-image
 x-identity-env: &identity-env
   # In-network addresses; passwords come from back/deploy/.env.
   IDENTITY_DATABASE_URL: postgres://identity:${IDENTITY_DB_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}@postgres:5432/identity?sslmode=disable
-  IDENTITY_REDIS_URL: redis://:${REDIS_PASSWORD:?copy deploy/.env.example to deploy/.env and set it}@redis:6379/0
   IDENTITY_KAFKA_BROKERS: kafka:9092
   IDENTITY_GRPC_ADDR: ":50051"
   IDENTITY_HTTP_ADDR: ":8081"
@@ -58,8 +58,6 @@ services:
       identity-migrate:
         condition: service_completed_successfully
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully

@@ -4,7 +4,6 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -70,14 +69,6 @@ type queries struct {
 }
 
 var _ service.Queries = (*queries)(nil)
-
-// Constraint names the repository translates into domain errors.
-const verifiedContractIndex = "farmer_verifications_verified_contract_key"
-
-func isUniqueViolation(err error, constraint string) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == constraint
-}
 
 // utc normalizes a scanned timestamp (pgx returns local time).
 func utc(t time.Time) time.Time { return t.UTC() }

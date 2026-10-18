@@ -21,7 +21,6 @@ import (
 const (
 	HeaderUserID      = "x-agrogram-user-id"
 	HeaderRoles       = "x-agrogram-roles"
-	HeaderPremium     = "x-agrogram-premium"
 	HeaderSessionID   = "x-agrogram-session-id"
 	HeaderCaller      = "x-agrogram-caller"
 	HeaderRequestID   = "x-request-id"
@@ -33,10 +32,6 @@ const (
 const (
 	// CallerAuthGateway is the only caller allowed to create accounts.
 	CallerAuthGateway = "auth-gateway"
-	// CallerOrderEscrow is the only caller allowed to turn Premium on or off
-	// (SetAccountPremium). TODO(billing): premium billing is not designed; if
-	// it becomes a service of its own, that service's name belongs here.
-	CallerOrderEscrow = "order-escrow"
 )
 
 // ServiceName is identity's own name, used as the actor of background work.
@@ -53,7 +48,6 @@ var (
 type Principal struct {
 	UserID    uuid.UUID // uuid.Nil: anonymous
 	Roles     []commonv1.Role
-	Premium   bool
 	SessionID string
 	Caller    string // x-agrogram-caller; set on internal calls only
 
@@ -69,7 +63,6 @@ type Principal struct {
 // UNAUTHENTICATED; unknown role names are ignored.
 func FromMetadata(md metadata.MD) (Principal, error) {
 	p := Principal{
-		Premium:     strings.EqualFold(first(md, HeaderPremium), "true"),
 		RequestID:   first(md, HeaderRequestID),
 		Traceparent: first(md, HeaderTraceparent),
 		Tracestate:  first(md, HeaderTracestate),

@@ -1,5 +1,5 @@
-// Command identity is the AGROGRAM identity service: accounts, the role set,
-// e-ijara farmer verification and the plan.
+// Command identity is the AGROGRAM identity service: accounts and the role
+// set (ADMIN only).
 //
 //	identity [serve]                  run the gRPC and HTTP servers (default)
 //	identity migrate up|down|status   manage the database schema
