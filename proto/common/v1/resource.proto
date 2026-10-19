@@ -7,25 +7,24 @@ import "buf/validate/validate.proto";
 // Identifiers: every entity id is a UUID string in canonical lowercase
 // 8-4-4-4-12 form. New ids should be UUIDv7 (time-ordered, index friendly);
 // v4 is accepted. A resource's own id field is `id`; references are
-// `<entity>_id` (owner_id, listing_id, transaction_id, media_id, ...).
+// `<entity>_id` (owner_id, listing_id, media_id, ...).
 // Validate with `(buf.validate.field).string.uuid = true`.
 
 // ResourceType names the kinds of entities that can be referenced across
 // service boundaries (notification deep links, media owners, audit).
 enum ResourceType {
+  // TRANSACTION (3), RATING (5) and FARMER_VERIFICATION (6) named escrow,
+  // ratings and e-ijara verification; all retired with the listings-only pivot.
+  reserved 3, 5, 6;
+  reserved "RESOURCE_TYPE_TRANSACTION", "RESOURCE_TYPE_RATING", "RESOURCE_TYPE_FARMER_VERIFICATION";
+
   RESOURCE_TYPE_UNSPECIFIED = 0;
   // A user account / public profile (one UUID across all services).
   RESOURCE_TYPE_USER = 1;
   // A catalog listing: sell offer or buy-request (see ListingKind).
   RESOURCE_TYPE_LISTING = 2;
-  // An escrow transaction (tranzaksiya).
-  RESOURCE_TYPE_TRANSACTION = 3;
   // An uploaded media object (image or video).
   RESOURCE_TYPE_MEDIA = 4;
-  // A rating left after a completed transaction.
-  RESOURCE_TYPE_RATING = 5;
-  // An e-ijara farmer verification request.
-  RESOURCE_TYPE_FARMER_VERIFICATION = 6;
 }
 
 // ResourceRef is a typed pointer to an entity owned by any service.
